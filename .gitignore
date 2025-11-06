@@ -1,0 +1,8 @@
+/FBMSNet/data/*
+/FBMSNet/output/*
+/FBMSNet/tsne/*
+/FBMSNet/debug_data/*
+/FBMSNet/*.whl
+# Ignore large CSV data
+data/*.csv
+*.csv
