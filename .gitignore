@@ -6,3 +6,4 @@
 # Ignore large CSV data
 data/*.csv
 *.csv
+*.dat
