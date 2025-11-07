@@ -481,7 +481,7 @@ if __name__ == "__main__":
     
     # Choose display mode: "bar" or "shapes"
     gui = EEGTrialGUI(num_classes=5, trials_per_class=2, baseline_ms=1000, 
-                      instruction_display_ms=2000, stim_ms=5000, display_mode="bar")
+                      instruction_display_ms=2000, stim_ms=5000, display_mode="shapes")
     
     gui.show()
     sys.exit(app.exec_())
