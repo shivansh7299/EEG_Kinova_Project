@@ -1,9 +1,43 @@
+# ===============================
+# Project: EEG_Kinova_Project
+# Purpose: Prevent large or generated files from being tracked
+# ===============================
+
+# --- Project folders ---
 /FBMSNet/data/*
 /FBMSNet/output/*
 /FBMSNet/tsne/*
 /FBMSNet/debug_data/*
 /FBMSNet/*.whl
-# Ignore large CSV data
-data/*.csv
+
+# --- Large EEG / CSV / MAT files ---
+data/**
 *.csv
 *.dat
+*.mat
+*.edf
+*.h5
+*.npy
+*.npz
+
+# --- Logs and temporary files ---
+*.log
+*.tmp
+*.bak
+*.swp
+
+# --- Python cache and environment ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.env/
+venv/
+.venv/
+
+# --- OS & IDE specific ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
