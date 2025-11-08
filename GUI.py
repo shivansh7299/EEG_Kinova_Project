@@ -295,13 +295,15 @@ class EEGTrialGUI(QWidget):
 
         color_pool = [
             QColor(255, 0, 0),
-            QColor(0, 255, 0),
-            QColor(0, 0, 255),
-            QColor(255, 255, 0),
-            QColor(255, 0, 255),
+            QColor(255, 0, 0)
+            # QColor(0, 255, 0),
+            # QColor(0, 0, 255),
+            # QColor(255, 255, 0),
+            # QColor(255, 0, 255),
         ]
         self.class_colors = {i + 1: color_pool[i] for i in range(num_classes)}
-        self.color_names = {1: "Red", 2: "Green", 3: "Blue", 4: "Yellow", 5: "Magenta"}
+        self.color_names = {1: "Red",2: "Red"}
+                            #  2: "Green", 3: "Blue", 4: "Yellow", 5: "Magenta"}
 
         self.trial_order = [c for c in range(1, num_classes + 1) for _ in range(trials_per_class)]
         random.shuffle(self.trial_order)
@@ -480,8 +482,8 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     
     # Choose display mode: "bar" or "shapes"
-    gui = EEGTrialGUI(num_classes=5, trials_per_class=2, baseline_ms=1000, 
-                      instruction_display_ms=2000, stim_ms=5000, display_mode="shapes")
+    gui = EEGTrialGUI(num_classes=2, trials_per_class=2, baseline_ms=1000, 
+                      instruction_display_ms=2000, stim_ms=5000, display_mode="bar")
     
     gui.show()
     sys.exit(app.exec_())
