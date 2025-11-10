@@ -4,11 +4,11 @@ from enum import Enum
 from PyQt5.QtCore import QTimer, Qt, QRect, QPoint
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QPushButton, QProgressBar, QHBoxLayout
 from PyQt5.QtGui import QColor, QPalette, QPainter, QPolygon
-# import UnicornPy
+import UnicornPy
 import numpy as np
 
 # Toggle EEG hardware integration
-USE_UNICORN = False
+USE_UNICORN = True
 
 
 # ========== DISPLAY MODE SYSTEM ==========
@@ -165,6 +165,7 @@ class UnicornRecorder(threading.Thread):
         super().__init__(daemon=True)
         self.gui = gui_ref
         self.running = False
+        self.recording = False  # NEW: separate flag for actual data recording
         self.device = None
         self.fs = 250
         self.num_channels = None
@@ -187,6 +188,11 @@ class UnicornRecorder(threading.Thread):
         except Exception as e:
             print("Failed to start acquisition:", e)
             raise
+    
+    def start_recording(self):
+        """Enable data recording (called after stabilization)"""
+        self.recording = True
+        print("Data recording ENABLED")
         
     def run(self):
         if self.device is None:
@@ -198,11 +204,12 @@ class UnicornRecorder(threading.Thread):
         samples_per_read = 4
         buffer_size = samples_per_read * self.num_channels * 4
         
-        print(f"Recording: {self.num_channels} channels, {samples_per_read} samples per read")
+        print(f"Thread running: {self.num_channels} channels, {samples_per_read} samples per read")
         print(f"Buffer size: {buffer_size} bytes")
-        print("Starting data acquisition loop...")
+        print("Data recording PAUSED (waiting for stabilization to complete)")
 
         total_samples = 0
+        discarded_samples = 0
         last_flush_time = time.time()
         
         time.sleep(0.5)
@@ -215,28 +222,34 @@ class UnicornRecorder(threading.Thread):
                 data = data.reshape((samples_per_read, self.num_channels))
                 
                 for sample in data:
-                    total_samples += 1
-                    trial = self.gui.current_trial
-                    cls = self.gui.current_class
-                    phase = getattr(self.gui, "phase", "idle")
-                    ts = datetime.now().strftime("%H:%M:%S.%f")
-                    row = [trial, cls, phase, ts] + sample.tolist()
-                    self.gui.csv_writer.writerow(row)
+                    # Only record data if recording flag is enabled
+                    if self.recording:
+                        total_samples += 1
+                        trial = self.gui.current_trial
+                        cls = self.gui.current_class
+                        phase = getattr(self.gui, "phase", "idle")
+                        ts = datetime.now().strftime("%H:%M:%S.%f")
+                        row = [trial, cls, phase, ts] + sample.tolist()
+                        self.gui.csv_writer.writerow(row)
+                    else:
+                        discarded_samples += 1
                 
                 current_time = time.time()
                 if current_time - last_flush_time >= 1.0:
-                    self.gui.log_file.flush()
+                    if self.recording:
+                        self.gui.log_file.flush()
+                        print(f"✓ {total_samples} samples recorded ({total_samples/250:.1f}s)")
                     last_flush_time = current_time
-                    print(f"✓ {total_samples} samples recorded ({total_samples/250:.1f}s)")
                 
         except KeyboardInterrupt:
             print("Recording interrupted by user")
         except Exception as e:
-            print(f"❌ Fatal error after {total_samples} samples: {e}")
+            print(f"Fatal error after {total_samples} samples: {e}")
             import traceback
             traceback.print_exc()
 
-        print(f"EEG recording stopped. Total: {total_samples} samples ({total_samples/250:.1f}s)")
+        print(f"EEG recording stopped. Recorded: {total_samples} samples ({total_samples/250:.1f}s)")
+        print(f"Discarded during stabilization: {discarded_samples} samples")
 
     def stop(self):
         print("Stopping recorder thread...")
@@ -261,19 +274,29 @@ class MockEEGRecorder(threading.Thread):
         super().__init__(daemon=True)
         self.gui = gui_ref
         self.running = False
+        self.recording = False  # NEW: separate flag for actual data recording
         self.num_channels = 17
+
+    def start_recording(self):
+        """Enable data recording (called after stabilization)"""
+        self.recording = True
+        print("Mock data recording ENABLED")
 
     def run(self):
         self.running = True
         print("Running mock EEG recorder (17 channels)")
+        print("Data recording PAUSED (waiting for stabilization to complete)")
+        
         while self.running:
-            fake_data = [random.uniform(-100, 100) for _ in range(self.num_channels)]
-            ts = datetime.now().strftime("%H:%M:%S.%f")
-            trial = self.gui.current_trial
-            cls = self.gui.current_class
-            phase = getattr(self.gui, "phase", "idle")
-            self.gui.csv_writer.writerow([trial, cls, phase, ts] + fake_data)
-            self.gui.log_file.flush()
+            # Only record data if recording flag is enabled
+            if self.recording:
+                fake_data = [random.uniform(-100, 100) for _ in range(self.num_channels)]
+                ts = datetime.now().strftime("%H:%M:%S.%f")
+                trial = self.gui.current_trial
+                cls = self.gui.current_class
+                phase = getattr(self.gui, "phase", "idle")
+                self.gui.csv_writer.writerow([trial, cls, phase, ts] + fake_data)
+                self.gui.log_file.flush()
             time.sleep(1 / 250)
 
     def stop(self):
@@ -283,7 +306,8 @@ class MockEEGRecorder(threading.Thread):
 # ========== MAIN EEG GUI ==========
 class EEGTrialGUI(QWidget):
     def __init__(self, num_classes=5, trials_per_class=3, baseline_ms=3000, 
-                 instruction_display_ms=3000, stim_ms=3000, display_mode="bar"):
+                 instruction_display_ms=3000, stim_ms=3000, stabilization_ms=20000, 
+                 display_mode="bar"):
         super().__init__()
 
         self.num_classes = num_classes
@@ -291,6 +315,8 @@ class EEGTrialGUI(QWidget):
         self.baseline_ms = baseline_ms
         self.instruction_display_ms = instruction_display_ms
         self.stim_ms = stim_ms
+        self.stabilization_ms = stabilization_ms  # NEW: stabilization duration
+
         self.display_mode = display_mode
 
         color_pool = [
@@ -363,7 +389,7 @@ class EEGTrialGUI(QWidget):
 
         self.set_background_color(QColor(0, 0, 0))
 
-        filename = f"EEG_{display_mode}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        filename = f"EEG_{display_mode}_trials_{trials_per_class}_classes_{num_classes}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         self.log_file = open(filename, "w", newline="")
         self.csv_writer = csv.writer(self.log_file)
         
@@ -390,7 +416,7 @@ class EEGTrialGUI(QWidget):
             try:
                 self.unicorn_thread.connect()
                 self.unicorn_thread.start()
-                self.info_label.setText("Connected! Starting experiment...")
+                self.info_label.setText("Connected! Starting stabilization...")
             except Exception as e:
                 print("EEG connection error:", e)
                 self.info_label.setText(f"Connection failed: {e}")
@@ -400,9 +426,55 @@ class EEGTrialGUI(QWidget):
         else:
             self.unicorn_thread.start()
             print("Running GUI with mock EEG recorder.")
-            self.info_label.setText("Mock mode - Starting experiment...")
+            self.info_label.setText("Mock mode - Starting stabilization...")
         
-        QTimer.singleShot(1000, self.run_next_trial)
+        # Start stabilization phase instead of going directly to trials
+        # QTimer.singleShot(1000, self.show_stabilization)
+
+    def show_stabilization(self):
+        """NEW: Stabilization phase - no data recording"""
+        self.phase = "stabilization"
+        self.current_class = 0
+        self.current_trial = 0
+        self.color_display.hide()
+        self.phase_duration = self.stabilization_ms
+        self.phase_elapsed = 0
+        self.progress.setValue(0)
+        self.set_background_color(QColor(0, 0, 0))
+        
+        # Show countdown in seconds
+        remaining_seconds = self.stabilization_ms // 1000
+        self.info_label.setText(f"Stabilization Phase\n\nPlease relax and minimize movement\n\n{remaining_seconds}s remaining")
+        
+        # Update countdown every second
+        self.stabilization_timer = QTimer()
+        self.stabilization_timer.timeout.connect(self.update_stabilization_countdown)
+        self.stabilization_timer.start(1000)
+        
+        self.progress_timer.start(100)
+        
+        # After stabilization, enable recording and start trials
+        QTimer.singleShot(self.stabilization_ms, self.end_stabilization)
+
+    def update_stabilization_countdown(self):
+        """Update the countdown display during stabilization"""
+        elapsed_seconds = self.phase_elapsed // 1000
+        remaining_seconds = (self.stabilization_ms - self.phase_elapsed) // 1000
+        if remaining_seconds > 0:
+            self.info_label.setText(f"Stabilization Phase\n\nPlease relax and minimize movement\n\n{remaining_seconds}s remaining")
+
+    def end_stabilization(self):
+        """End stabilization and begin data recording"""
+        self.stabilization_timer.stop()
+        print("\n" + "="*50)
+        print("STABILIZATION COMPLETE - Beginning data recording")
+        print("="*50 + "\n")
+        
+        # Enable data recording in the thread
+        self.unicorn_thread.start_recording()
+        
+        # Start the actual trials
+        self.run_next_trial()
 
     def run_next_trial(self):
         if self.current_trial >= self.total_trials:
@@ -482,8 +554,10 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     
     # Choose display mode: "bar" or "shapes"
+    # NEW: Added stabilization_ms parameter (default 20 seconds)
     gui = EEGTrialGUI(num_classes=2, trials_per_class=2, baseline_ms=1000, 
-                      instruction_display_ms=2000, stim_ms=5000, display_mode="bar")
+                      instruction_display_ms=2000, stim_ms=5000, 
+                      stabilization_ms=20000, display_mode="bar")
     
     gui.show()
     sys.exit(app.exec_())
