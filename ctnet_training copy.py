@@ -804,38 +804,6 @@ from ctnet_model import CTNet, CTNetLite
 
 
 # ============================================================================
-# DATA AUGMENTATION FOR EEG (DISABLED - NOT USED FOR REAL-TIME INFERENCE)
-# ============================================================================
-# Augmentation code kept for reference but not used during training
-# to ensure model works with raw, unaugmented data in real-time scenarios
-#
-# class EEGAugmentation:
-#     """Data augmentation for EEG signals to increase dataset size."""
-#     
-#     @staticmethod
-#     def add_gaussian_noise(x, noise_factor=0.05):
-#         noise = torch.randn_like(x) * noise_factor * x.std()
-#         return x + noise
-#     
-#     @staticmethod
-#     def time_shift(x, shift_max=10):
-#         shift = random.randint(-shift_max, shift_max)
-#         if shift == 0:
-#             return x
-#         return torch.roll(x, shifts=shift, dims=-1)
-#     
-#     @staticmethod
-#     def channel_dropout(x, p=0.1):
-#         mask = torch.ones_like(x)
-#         n_channels = x.shape[1]
-#         n_drop = int(n_channels * p)
-#         if n_drop > 0:
-#             channels_to_drop = random.sample(range(n_channels), n_drop)
-#             mask[:, channels_to_drop, :] = 0
-#         return x * mask
-
-
-# ============================================================================
 # TRAINING FUNCTION
 # ============================================================================
 def train_ctnet():
@@ -847,17 +815,9 @@ def train_ctnet():
     # -----------------------------------------------
     # STEP 1 — LOAD DATA
     # -----------------------------------------------
-    # NOTE: Data should be preprocessed using preprocessing_3_class_CTNet.ipynb
-    # Expected format: (N, C, T) where N=samples, C=8 channels, T=250 timepoints
-    # The preprocessing notebook supports two methods:
-    #   - 'automatic': Uses data_curation.py pipeline (uniform_len -> filter -> zscore_normalize)
-    #   - 'trial_index': Uses original notebook pipeline (filter -> baseline_norm -> StandardScaler)
-    # Both methods produce the same output format: (N, 8, 250)
-    
     data_dir = ""  # put dataset folder path if needed
 
     print("\n📂 Loading preprocessed EEG data...")
-    print("   Expected format: (N, 8, 250) - (samples, channels, timepoints)")
     X_train = np.load(os.path.join(data_dir, "X_train_ctnet.npy"))
     y_train = np.load(os.path.join(data_dir, "y_train_ctnet.npy"))
     X_test = np.load(os.path.join(data_dir, "X_test_ctnet.npy"))
@@ -868,15 +828,6 @@ def train_ctnet():
     print(f"X_test:  {X_test.shape}")
     print(f"y_test:  {y_test.shape}")
     print(f"Classes: {np.unique(y_train)}")
-    
-    # Validate data shape
-    if X_train.ndim != 3:
-        raise ValueError(f"Expected 3D array (N, C, T), got {X_train.ndim}D: {X_train.shape}")
-    if X_train.shape[1] != 8:
-        raise ValueError(f"Expected 8 channels, got {X_train.shape[1]} channels")
-    if X_train.shape[2] != 250:
-        print(f"⚠️  Warning: Expected 250 timepoints, got {X_train.shape[2]}. Model will adapt.")
-    print("✅ Data shape validation passed!")
 
     # If 4D (e.g., FBMSNet output with frequency bands), fold bands into channels
     if X_train.ndim == 4:
@@ -898,7 +849,7 @@ def train_ctnet():
     X_train_split, X_val, y_train_split, y_val = train_test_split(
         X_train,
         y_train,
-        test_size=0.10,
+        test_size=0.20,
         stratify=y_train,
         random_state=42
     )
@@ -919,7 +870,7 @@ def train_ctnet():
     # -----------------------------------------------
     # STEP 3 — DATA LOADERS
     # -----------------------------------------------
-    batch_size = 16  # Smaller batch for more gradient updates per epoch
+    batch_size = 32  # still small relative to dataset, but stabilizes gradients
 
     train_loader = torch.utils.data.DataLoader(
         torch.utils.data.TensorDataset(X_train_split, y_train_split),
@@ -951,36 +902,40 @@ def train_ctnet():
     n_channels = X_train_split.shape[1]
     n_timepoints = X_train_split.shape[2]
 
-    # Use full CTNet with reduced layers for better capacity (even for small datasets)
-    # CTNetLite is too simple and underfits
-    print("Using Lite CTNet with optimized architecture for small dataset.")
-    # model = CTNet(
-    #     n_channels=n_channels,
-    #     n_timepoints=n_timepoints,
-    #     n_classes=num_classes,
-    #     sampling_rate=250,
-    #     F1=8,
-    #     D=2,
-    #     F2=16,
-    #     Kc1=None,
-    #     Kc2=16,
-    #     P1=8,
-    #     P2=2,
-    #     dropout_conv=0.5,  # Moderate dropout
-    #     n_heads=2,
-    #     n_layers=2,  # Reduced from 6 to prevent overfitting, but more than Lite
-    #     ff_mult=4,
-    #     dropout_transformer=0.1,
-    #     use_positional_encoding=True,
-    #     classifier_dropout=0.4
-    # ).to(device)
-    model = CTNetLite(
+    # Auto-switch: if dataset extremely small, use CTNetLite
+    use_lite = X_train_split.shape[0] < 1500
+
+    if use_lite:
+        print("Using CTNetLite (small dataset mode).")
+        model = CTNetLite(
             n_channels=n_channels,
             n_timepoints=n_timepoints,
             n_classes=num_classes,
-            # dropout_conv=0.7  # Validation Accuracy: 42.55% Test Accuracy:      29.17%
-            dropout_conv=0.5 #-  Validation Accuracy = 57.45% Test Accuracy =  47%
-            # Final Test Accuracy: 50.00% Best Val Accuracy:      61.70%
+            sampling_rate=250,
+            dropout_conv=0.3,
+            classifier_dropout=0.3
+        ).to(device)
+    else:
+        print("Using full CTNet (paper-aligned).")
+        model = CTNet(
+            n_channels=n_channels,
+            n_timepoints=n_timepoints,
+            n_classes=num_classes,
+            sampling_rate=250,
+            F1=8,
+            D=2,
+            F2=16,
+            Kc1=None,      # uses Fs/4 rule
+            Kc2=16,
+            P1=8,
+            P2=2,
+            dropout_conv=0.5,
+            n_heads=2,
+            n_layers=4,    # You can increase to 6 if GPU allows
+            ff_mult=4,
+            dropout_transformer=0.1,
+            use_positional_encoding=True,
+            classifier_dropout=0.3
         ).to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -989,217 +944,132 @@ def train_ctnet():
     # -----------------------------------------------
     # STEP 5 — OPTIMIZER + SCHEDULER
     # -----------------------------------------------
-    # Add class weights to handle any imbalance
-    from collections import Counter
-    train_counts = Counter(y_train_split.numpy())
-    total = sum(train_counts.values())
-    class_weights = torch.FloatTensor([
-        total / (len(train_counts) * train_counts[i]) for i in sorted(train_counts.keys())
-    ]).to(device)
-    print(f"Class weights: {class_weights}")
-    
-    # Use Focal Loss to focus on hard examples and prevent class collapse
-    # Focal loss helps when model ignores certain classes
-    class FocalLoss(nn.Module):
-        """Focal Loss to address class imbalance and hard examples."""
-        def __init__(self, class_weights, alpha=1.0, gamma=2.0):
-            super().__init__()
-            self.class_weights = class_weights
-            self.alpha = alpha
-            self.gamma = gamma
-        
-        def forward(self, preds, targets):
-            ce_loss = nn.functional.cross_entropy(preds, targets, weight=self.class_weights, reduction='none')
-            pt = torch.exp(-ce_loss)  # Probability of true class
-            focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
-            return focal_loss.mean()
-    
-    # Use focal loss to force learning of all classes
-    criterion = FocalLoss(class_weights, alpha=0.25, gamma=1.0)
-    # criterion = nn.CrossEntropyLoss(weight=class_weights)
+    criterion = nn.CrossEntropyLoss()
+
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=5e-4,
+        weight_decay=1e-3
+    )
+
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode='max',
+        factor=0.7,
+        patience=25,
+        min_lr=5e-6,
+        verbose=True
+    )
 
     # -----------------------------------------------
-    # STEP 5 — LEARNING RATE SEARCH
+    # STEP 6 — TRAINING LOOP
     # -----------------------------------------------
-    # Learning rates to test
-    learning_rates = [1e-4, 3e-4, 1e-3, 3e-3, 1e-2]
-    num_epochs = 300  # Fixed 300 epochs per learning rate
-    
-    # Store results for each learning rate
-    lr_results = {}  # {lr: {'best_val_acc': float, 'best_epoch': int, 'model_path': str}}
-    
-    print("\n" + "="*80)
-    print("🔍 LEARNING RATE SEARCH")
-    print("="*80)
-    print(f"Testing {len(learning_rates)} learning rates: {learning_rates}")
-    print(f"Epochs per LR: {num_epochs}")
-    print("="*80 + "\n")
+    num_epochs = 500
+    patience = 200
+    patience_counter = 0
+    best_val_acc = 0
 
-    # -----------------------------------------------
-    # STEP 6 — TRAIN FOR EACH LEARNING RATE
-    # -----------------------------------------------
-    for lr_idx, lr in enumerate(learning_rates):
-        print("\n" + "="*80)
-        print(f"📊 Learning Rate {lr_idx+1}/{len(learning_rates)}: {lr:.6f}")
-        print("="*80)
-        
-        # Reinitialize model for each LR
-        model = CTNetLite(
-            n_channels=n_channels,
-            n_timepoints=n_timepoints,
-            n_classes=num_classes,
-            dropout_conv=0.5
-        ).to(device)
-        
-        # Optimizer with current learning rate
-        optimizer = optim.AdamW(
-            model.parameters(),
-            lr=lr,
-            weight_decay=3e-4
-        )
-        
-        # Learning rate scheduler (ReduceLROnPlateau)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
-            mode='max',        # Maximize validation accuracy
-            factor=0.5,        # Halve LR when plateau
-            patience=30,       # Wait 30 epochs
-            min_lr=1e-6,       # Minimum learning rate
-            verbose=False      # Don't print scheduler messages
-        )
-        
-        best_val_acc_lr = 0
-        best_epoch_lr = 0
-        patience_counter = 0
-        patience = 100  # Early stopping patience
-        
-        print(f"🏁 Training for {num_epochs} epochs...\n")
-        
-        for epoch in range(num_epochs):
-            # ------- TRAIN -------
-            model.train()
-            train_loss = 0
-            train_correct = 0
-            train_total = 0
+    history = {
+        "train_loss": [], "train_acc": [],
+        "val_loss": [], "val_acc": [],
+        "lr": []
+    }
 
-            for xb, yb in train_loader:
+    print("\n🏁 Starting training...\n")
+
+    for epoch in range(num_epochs):
+
+        # ------- TRAIN -------
+        model.train()
+        train_loss = 0
+        train_correct = 0
+        train_total = 0
+
+        for xb, yb in train_loader:
+            xb, yb = xb.to(device), yb.to(device)
+
+            optimizer.zero_grad()
+
+            out = model(xb)
+            preds = out[0] if isinstance(out, tuple) else out
+
+            loss = criterion(preds, yb)
+            loss.backward()
+
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+            optimizer.step()
+
+            train_loss += loss.item()
+            train_correct += (preds.argmax(1) == yb).sum().item()
+            train_total += yb.size(0)
+
+        avg_train_loss = train_loss / len(train_loader)
+        train_acc = 100 * train_correct / train_total
+
+        # ------- VALIDATE -------
+        model.eval()
+        val_loss = 0
+        val_correct = 0
+        val_total = 0
+
+        with torch.no_grad():
+            for xb, yb in val_loader:
                 xb, yb = xb.to(device), yb.to(device)
-                
-                optimizer.zero_grad()
+
                 out = model(xb)
                 preds = out[0] if isinstance(out, tuple) else out
+
                 loss = criterion(preds, yb)
-                loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
+                val_loss += loss.item()
+                val_correct += (preds.argmax(1) == yb).sum().item()
+                val_total += yb.size(0)
 
-                train_loss += loss.item()
-                train_correct += (preds.argmax(1) == yb).sum().item()
-                train_total += yb.size(0)
+        avg_val_loss = val_loss / len(val_loader)
+        val_acc = 100 * val_correct / val_total
 
-            avg_train_loss = train_loss / len(train_loader)
-            train_acc = 100 * train_correct / train_total
+        scheduler.step(val_acc)
 
-            # ------- VALIDATE -------
-            model.eval()
-            val_loss = 0
-            val_correct = 0
-            val_total = 0
+        history["train_loss"].append(avg_train_loss)
+        history["val_loss"].append(avg_val_loss)
+        history["train_acc"].append(train_acc)
+        history["val_acc"].append(val_acc)
+        history["lr"].append(optimizer.param_groups[0]["lr"])
 
-            with torch.no_grad():
-                for xb, yb in val_loader:
-                    xb, yb = xb.to(device), yb.to(device)
-                    out = model(xb)
-                    preds = out[0] if isinstance(out, tuple) else out
-                    loss = criterion(preds, yb)
-                    val_loss += loss.item()
-                    val_correct += (preds.argmax(1) == yb).sum().item()
-                    val_total += yb.size(0)
+        if (epoch + 1) % 5 == 0 or epoch < 10:
+            print(
+                f"Epoch {epoch+1:03d}/{num_epochs} | "
+                f"Train {train_acc:5.1f}% | Val {val_acc:5.1f}% | "
+                f"LR {optimizer.param_groups[0]['lr']:.6f}"
+            )
 
-            avg_val_loss = val_loss / len(val_loader)
-            val_acc = 100 * val_correct / val_total
+        # Best model saving + early stopping
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            patience_counter = 0
 
-            # Update scheduler
-            scheduler.step(val_acc)
+            torch.save(
+                {"model_state_dict": model.state_dict(),
+                 "optimizer": optimizer.state_dict(),
+                 "epoch": epoch,
+                 "val_acc": val_acc},
+                "ctnet_best_model.pth"
+            )
+            print(f"   ✅ New best model saved! Val Acc = {best_val_acc:.2f}%")
 
-            # Track best model for this LR
-            if val_acc > best_val_acc_lr:
-                best_val_acc_lr = val_acc
-                best_epoch_lr = epoch
-                patience_counter = 0
-                
-                # Save model for this specific LR
-                model_path = f"ctnet_best_model_lr_{lr:.6f}.pth"
-                torch.save(
-                    {
-                        "model_state_dict": model.state_dict(),
-                        "optimizer": optimizer.state_dict(),
-                        "epoch": epoch,
-                        "val_acc": val_acc,
-                        "lr": lr
-                    },
-                    model_path
-                )
-                
-                if (epoch + 1) % 25 == 0 or epoch < 5:
-                    print(f"   Epoch {epoch+1:03d}/{num_epochs} | "
-                          f"Train: {train_acc:5.1f}% | Val: {val_acc:5.1f}% | "
-                          f"LR: {optimizer.param_groups[0]['lr']:.6f} | "
-                          f"✅ Best: {best_val_acc_lr:.2f}%")
-            else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    print(f"\n   ⛔ Early stopping at epoch {epoch+1}")
-                    break
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print("\n🛑 Early Stopping Triggered!")
+                break
 
-        # Store results for this LR
-        lr_results[lr] = {
-            'best_val_acc': best_val_acc_lr,
-            'best_epoch': best_epoch_lr,
-            'model_path': f"ctnet_best_model_lr_{lr:.6f}.pth"
-        }
-        
-        print(f"\n✅ LR {lr:.6f} Complete:")
-        print(f"   Best Val Accuracy: {best_val_acc_lr:.2f}% @ Epoch {best_epoch_lr+1}")
-        print(f"   Model saved: {lr_results[lr]['model_path']}")
+    print("\nTraining Completed.")
+    print(f"Best Validation Accuracy = {best_val_acc:.2f}%")
 
     # -----------------------------------------------
-    # STEP 7 — FIND BEST LEARNING RATE
+    # STEP 7 — TEST EVALUATION
     # -----------------------------------------------
-    print("\n" + "="*80)
-    print("📊 LEARNING RATE SEARCH RESULTS")
-    print("="*80)
-    
-    best_lr = max(lr_results.keys(), key=lambda k: lr_results[k]['best_val_acc'])
-    best_overall_acc = lr_results[best_lr]['best_val_acc']
-    
-    print("\nResults Summary:")
-    print("-" * 80)
-    print(f"{'Learning Rate':<15} {'Best Val Acc':<15} {'Best Epoch':<12} {'Model Path':<40}")
-    print("-" * 80)
-    for lr in sorted(lr_results.keys()):
-        result = lr_results[lr]
-        marker = " ⭐ BEST" if lr == best_lr else ""
-        print(f"{lr:<15.6f} {result['best_val_acc']:<15.2f}% {result['best_epoch']+1:<12} {result['model_path']:<40}{marker}")
-    print("-" * 80)
-    print(f"\n🏆 Best Learning Rate: {best_lr:.6f}")
-    print(f"   Best Validation Accuracy: {best_overall_acc:.2f}%")
-    print(f"   Best Model: {lr_results[best_lr]['model_path']}")
-    print("="*80)
-
-    # -----------------------------------------------
-    # STEP 8 — TEST EVALUATION (ONLY BEST MODEL)
-    # -----------------------------------------------
-    print("\n" + "="*80)
-    print("🧪 TESTING BEST MODEL")
-    print("="*80)
-    print(f"Loading best model: {lr_results[best_lr]['model_path']}")
-    print(f"Learning Rate: {best_lr:.6f}")
-    print(f"Validation Accuracy: {best_overall_acc:.2f}%")
-    print("="*80)
-    
-    # Load best model
-    ckpt = torch.load(lr_results[best_lr]['model_path'], map_location=device)
+    print("\nLoading best checkpoint...")
+    ckpt = torch.load("ctnet_best_model.pth", map_location=device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
@@ -1224,57 +1094,38 @@ def train_ctnet():
 
     test_acc = 100 * test_correct / test_total
 
-    print("\n" + "="*80)
-    print("🎯 FINAL TEST RESULTS")
-    print("="*80)
-    print(f"Best Learning Rate:     {best_lr:.6f}")
-    print(f"Best Val Accuracy:      {best_overall_acc:.2f}%")
-    print(f"Final Test Accuracy:    {test_acc:.2f}%")
-    print("="*80 + "\n")
+    print("\n==============================")
+    print(f"🎯 Final Test Accuracy: {test_acc:.2f}%")
+    print(f"Best Val Accuracy:      {best_val_acc:.2f}%")
+    print("==============================\n")
 
     # -----------------------------------------------
-    # STEP 9 — PLOTS
+    # STEP 8 — PLOTS
     # -----------------------------------------------
     os.makedirs("output", exist_ok=True)
 
-    # Learning Rate Search Results Plot
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    # Training curves
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-    # Plot 1: Validation Accuracy vs Learning Rate
-    lrs = sorted(lr_results.keys())
-    val_accs = [lr_results[lr]['best_val_acc'] for lr in lrs]
-    
-    axes[0].plot(lrs, val_accs, 'o-', linewidth=2, markersize=8, label='Best Val Acc')
-    axes[0].axvline(best_lr, color='r', linestyle='--', linewidth=2, label=f'Best LR: {best_lr:.6f}')
-    axes[0].set_xlabel('Learning Rate', fontsize=12)
-    axes[0].set_ylabel('Best Validation Accuracy (%)', fontsize=12)
-    axes[0].set_title('Learning Rate Search Results', fontsize=14, fontweight='bold')
-    axes[0].set_xscale('log')
-    axes[0].grid(True, alpha=0.3)
-    axes[0].legend()
-    
-    # Add value labels on points
-    for lr, acc in zip(lrs, val_accs):
-        axes[0].annotate(f'{acc:.1f}%', (lr, acc), 
-                        textcoords="offset points", xytext=(0,10), ha='center', fontsize=9)
+    axes[0, 0].plot(history["train_loss"], label="Train")
+    axes[0, 0].plot(history["val_loss"], label="Val")
+    axes[0, 0].set_title("Loss")
+    axes[0, 0].legend()
 
-    # Plot 2: Bar chart comparison
-    colors = ['red' if lr == best_lr else 'steelblue' for lr in lrs]
-    bars = axes[1].bar(range(len(lrs)), val_accs, color=colors, alpha=0.7, edgecolor='black', linewidth=1.5)
-    axes[1].set_xticks(range(len(lrs)))
-    axes[1].set_xticklabels([f'{lr:.0e}' for lr in lrs], rotation=45, ha='right')
-    axes[1].set_ylabel('Best Validation Accuracy (%)', fontsize=12)
-    axes[1].set_title('Learning Rate Comparison', fontsize=14, fontweight='bold')
-    axes[1].grid(True, alpha=0.3, axis='y')
-    
-    # Add value labels on bars
-    for i, (bar, acc) in enumerate(zip(bars, val_accs)):
-        height = bar.get_height()
-        axes[1].text(bar.get_x() + bar.get_width()/2., height,
-                    f'{acc:.1f}%', ha='center', va='bottom', fontsize=10, fontweight='bold')
+    axes[0, 1].plot(history["train_acc"], label="Train")
+    axes[0, 1].plot(history["val_acc"], label="Val")
+    axes[0, 1].set_title("Accuracy")
+    axes[0, 1].legend()
+
+    axes[1, 0].plot(history["lr"])
+    axes[1, 0].set_title("Learning Rate")
+
+    gap = [t - v for t, v in zip(history["train_acc"], history["val_acc"])]
+    axes[1, 1].plot(gap)
+    axes[1, 1].set_title("Overfitting Gap (Train - Val)")
 
     plt.tight_layout()
-    plt.savefig("./output/ctnet_lr_search_results.png", dpi=300, bbox_inches='tight')
+    plt.savefig("./output/ctnet_training_curves.png", dpi=300)
     plt.show()
 
     # Confusion Matrix
@@ -1298,19 +1149,18 @@ def train_ctnet():
     plt.savefig("./output/ctnet_confusion_matrix.png", dpi=300)
     plt.show()
 
-    return test_acc, best_overall_acc, best_lr, lr_results
+    return test_acc, best_val_acc
 
 
 # ============================================================================
 # MAIN ENTRY (REQUIRED FOR WINDOWS)
 # ============================================================================
 if __name__ == "__main__":
-    test_acc, val_acc, best_lr, lr_results = train_ctnet()
+    test_acc, val_acc = train_ctnet()
 
-    print("\n" + "="*80)
+    print("\n==============================")
     print("📊 FINAL SUMMARY")
-    print("="*80)
-    print(f"Best Learning Rate:        {best_lr:.6f}")
-    print(f"Best Validation Accuracy:  {val_acc:.2f}%")
-    print(f"Final Test Accuracy:       {test_acc:.2f}%")
-    print("="*80)
+    print("==============================")
+    print(f"Best Validation Accuracy: {val_acc:.2f}%")
+    print(f"Final Test Accuracy:      {test_acc:.2f}%")
+    print("==============================")

@@ -165,7 +165,7 @@ class UnicornRecorder(threading.Thread):
         super().__init__(daemon=True)
         self.gui = gui_ref
         self.running = False
-        self.recording = False  # NEW: separate flag for actual data recording
+        self.recording = False
         self.device = None
         self.fs = 250
         self.num_channels = None
@@ -222,14 +222,17 @@ class UnicornRecorder(threading.Thread):
                 data = data.reshape((samples_per_read, self.num_channels))
                 
                 for sample in data:
-                    # Only record data if recording flag is enabled
                     if self.recording:
                         total_samples += 1
                         trial = self.gui.current_trial
                         cls = self.gui.current_class
                         phase = getattr(self.gui, "phase", "idle")
                         ts = datetime.now().strftime("%H:%M:%S.%f")
-                        row = [trial, cls, phase, ts] + sample.tolist()
+                        if 1 <= trial <= len(self.gui.trial_split):
+                            split = self.gui.trial_split[trial - 1]
+                        else:
+                            split = "train"
+                        row = [trial, cls, split, phase, ts] + sample.tolist()
                         self.gui.csv_writer.writerow(row)
                     else:
                         discarded_samples += 1
@@ -238,7 +241,7 @@ class UnicornRecorder(threading.Thread):
                 if current_time - last_flush_time >= 1.0:
                     if self.recording:
                         self.gui.log_file.flush()
-                        print(f"✓ {total_samples} samples recorded ({total_samples/250:.1f}s)")
+                        print(f"{total_samples} samples recorded ({total_samples/250:.1f}s)")
                     last_flush_time = current_time
                 
         except KeyboardInterrupt:
@@ -274,7 +277,7 @@ class MockEEGRecorder(threading.Thread):
         super().__init__(daemon=True)
         self.gui = gui_ref
         self.running = False
-        self.recording = False  # NEW: separate flag for actual data recording
+        self.recording = False
         self.num_channels = 17
 
     def start_recording(self):
@@ -288,14 +291,17 @@ class MockEEGRecorder(threading.Thread):
         print("Data recording PAUSED (waiting for stabilization to complete)")
         
         while self.running:
-            # Only record data if recording flag is enabled
             if self.recording:
                 fake_data = [random.uniform(-100, 100) for _ in range(self.num_channels)]
                 ts = datetime.now().strftime("%H:%M:%S.%f")
                 trial = self.gui.current_trial
                 cls = self.gui.current_class
                 phase = getattr(self.gui, "phase", "idle")
-                self.gui.csv_writer.writerow([trial, cls, phase, ts] + fake_data)
+                if 1 <= trial <= len(self.gui.trial_split):
+                    split = self.gui.trial_split[trial - 1]
+                else:
+                    split = "train"
+                self.gui.csv_writer.writerow([trial, cls, split, phase, ts] + fake_data)
                 self.gui.log_file.flush()
             time.sleep(1 / 250)
 
@@ -315,25 +321,64 @@ class EEGTrialGUI(QWidget):
         self.baseline_ms = baseline_ms
         self.instruction_display_ms = instruction_display_ms
         self.stim_ms = stim_ms
-        self.stabilization_ms = stabilization_ms  # NEW: stabilization duration
+        self.stabilization_ms = stabilization_ms
 
         self.display_mode = display_mode
 
+        # ===== TRAIN/TEST SPLIT CONFIGURATION =====
+        self.train_trials_per_class = 16   # Train trials per class
+        self.test_trials_per_class = 4    # Test trials per class
+        # ==========================================
+
         color_pool = [
             QColor(255, 0, 0),
+            QColor(255, 0, 0),
             QColor(255, 0, 0)
-            # QColor(0, 255, 0),
-            # QColor(0, 0, 255),
-            # QColor(255, 255, 0),
-            # QColor(255, 0, 255),
         ]
         self.class_colors = {i + 1: color_pool[i] for i in range(num_classes)}
-        self.color_names = {1: "Red",2: "Red"}
-                            #  2: "Green", 3: "Blue", 4: "Yellow", 5: "Magenta"}
+        self.color_names = {1: "Up", 2: "Middle", 3: "Down"}
 
-        self.trial_order = [c for c in range(1, num_classes + 1) for _ in range(trials_per_class)]
-        random.shuffle(self.trial_order)
+        # ===== NEW: STRATIFIED SPLIT CREATION =====
+        # Create trials organized by class
+        self.trial_order = []
+        self.trial_split = []
+        
+        for class_id in range(1, num_classes + 1):
+            # Create list of splits for this class
+            class_splits = (["train"] * self.train_trials_per_class + 
+                          ["test"] * self.test_trials_per_class)
+            
+            # Shuffle splits for this class
+            random.shuffle(class_splits)
+            
+            # Add to trial lists
+            for split in class_splits:
+                self.trial_order.append(class_id)
+                self.trial_split.append(split)
+        
+        # Shuffle trials while keeping order and split aligned
+        combined = list(zip(self.trial_order, self.trial_split))
+        random.shuffle(combined)
+        self.trial_order, self.trial_split = zip(*combined)
+        self.trial_order = list(self.trial_order)
+        self.trial_split = list(self.trial_split)
+        
         self.total_trials = len(self.trial_order)
+        
+        # Print split statistics
+        print("\n" + "="*50)
+        print("TRAIN/TEST SPLIT STATISTICS")
+        print("="*50)
+        for class_id in range(1, num_classes + 1):
+            train_count = sum(1 for i, cls in enumerate(self.trial_order) 
+                            if cls == class_id and self.trial_split[i] == "train")
+            test_count = sum(1 for i, cls in enumerate(self.trial_order) 
+                           if cls == class_id and self.trial_split[i] == "test")
+            print(f"Class {class_id} ({self.color_names[class_id]}): "
+                  f"{train_count} train, {test_count} test")
+        print("="*50 + "\n")
+        # ==========================================
+
         self.current_trial = 0
         self.current_class = 0
         self.phase = "idle"
@@ -393,7 +438,7 @@ class EEGTrialGUI(QWidget):
         self.log_file = open(filename, "w", newline="")
         self.csv_writer = csv.writer(self.log_file)
         
-        header = ["trial_index", "class_label", "phase", "timestamp"]
+        header = ["trial_index", "class_label", "split", "phase", "timestamp"]
         header += [f"Ch{i+1}" for i in range(17)]
         self.csv_writer.writerow(header)
 
@@ -428,11 +473,10 @@ class EEGTrialGUI(QWidget):
             print("Running GUI with mock EEG recorder.")
             self.info_label.setText("Mock mode - Starting stabilization...")
         
-        # Start stabilization phase instead of going directly to trials
-        # QTimer.singleShot(1000, self.show_stabilization)
+        QTimer.singleShot(1000, self.show_stabilization)
 
     def show_stabilization(self):
-        """NEW: Stabilization phase - no data recording"""
+        """Stabilization phase - no data recording"""
         self.phase = "stabilization"
         self.current_class = 0
         self.current_trial = 0
@@ -442,24 +486,21 @@ class EEGTrialGUI(QWidget):
         self.progress.setValue(0)
         self.set_background_color(QColor(0, 0, 0))
         
-        # Show countdown in seconds
         remaining_seconds = self.stabilization_ms // 1000
         self.info_label.setText(f"Stabilization Phase\n\nPlease relax and minimize movement\n\n{remaining_seconds}s remaining")
         
-        # Update countdown every second
         self.stabilization_timer = QTimer()
         self.stabilization_timer.timeout.connect(self.update_stabilization_countdown)
         self.stabilization_timer.start(1000)
         
         self.progress_timer.start(100)
         
-        # After stabilization, enable recording and start trials
         QTimer.singleShot(self.stabilization_ms, self.end_stabilization)
 
     def update_stabilization_countdown(self):
         """Update the countdown display during stabilization"""
-        elapsed_seconds = self.phase_elapsed // 1000
-        remaining_seconds = (self.stabilization_ms - self.phase_elapsed) // 1000
+        self.phase_elapsed += 1000
+        remaining_seconds = max(0, (self.stabilization_ms - self.phase_elapsed) // 1000)
         if remaining_seconds > 0:
             self.info_label.setText(f"Stabilization Phase\n\nPlease relax and minimize movement\n\n{remaining_seconds}s remaining")
 
@@ -470,10 +511,8 @@ class EEGTrialGUI(QWidget):
         print("STABILIZATION COMPLETE - Beginning data recording")
         print("="*50 + "\n")
         
-        # Enable data recording in the thread
         self.unicorn_thread.start_recording()
         
-        # Start the actual trials
         self.run_next_trial()
 
     def run_next_trial(self):
@@ -501,7 +540,7 @@ class EEGTrialGUI(QWidget):
         self.color_display.hide()
         self.phase_duration = self.instruction_display_ms
         color_name = self.color_names[self.current_class]
-        self.info_label.setText(f"Think about color:\n\n{color_name}")
+        self.info_label.setText(f"Think about Position:\n\n{color_name}")
         self.phase_elapsed = 0
         self.progress.setValue(0)
         self.set_background_color(QColor(0, 0, 0))
@@ -554,9 +593,8 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     
     # Choose display mode: "bar" or "shapes"
-    # NEW: Added stabilization_ms parameter (default 20 seconds)
-    gui = EEGTrialGUI(num_classes=2, trials_per_class=2, baseline_ms=1000, 
-                      instruction_display_ms=2000, stim_ms=5000, 
+    gui = EEGTrialGUI(num_classes=3, trials_per_class=20, baseline_ms=3000, 
+                      instruction_display_ms=2000, stim_ms=4000, 
                       stabilization_ms=20000, display_mode="bar")
     
     gui.show()

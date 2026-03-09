@@ -1164,17 +1164,6 @@ class CTNet(nn.Module):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0.0)
-        
-        # CRITICAL: Initialize classifier to predict all classes equally
-        # This prevents the model from collapsing to one class
-        if hasattr(self, 'classifier'):
-            for m in self.classifier.modules():
-                if isinstance(m, nn.Linear):
-                    # Initialize with small random values, not zeros
-                    nn.init.normal_(m.weight, mean=0.0, std=0.01)
-                    if m.bias is not None:
-                        # Initialize bias to small positive values to encourage all classes
-                        nn.init.constant_(m.bias, 0.01)
 
     def forward(self, x: torch.Tensor):
         """
@@ -1272,7 +1261,7 @@ class CTNetLite(nn.Module):
             activation="gelu"
         )
 
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)  # Increased from 1 for better capacity
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=1)
 
         self.classifier = nn.Sequential(
             nn.Dropout(classifier_dropout),
@@ -1291,17 +1280,6 @@ class CTNetLite(nn.Module):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0.0)
-        
-        # CRITICAL: Initialize classifier to predict all classes equally
-        # This prevents the model from collapsing to one class
-        if hasattr(self, 'classifier'):
-            for m in self.classifier.modules():
-                if isinstance(m, nn.Linear):
-                    # Initialize with small random values, not zeros
-                    nn.init.normal_(m.weight, mean=0.0, std=0.01)
-                    if m.bias is not None:
-                        # Initialize bias to small positive values to encourage all classes
-                        nn.init.constant_(m.bias, 0.01)
 
     def forward(self, x: torch.Tensor):
         # (B, C, T)
