@@ -9,6 +9,10 @@
 /FBMSNet/tsne/*
 /FBMSNet/debug_data/*
 /FBMSNet/*.whl
+/FBMSNet/**/__pycache__/
+/FBMSNet/**/*.pyc
+/FBMSNet/**/*.npy
+/FBMSNet/**/*.pth
 
 # --- Large EEG / CSV / MAT files ---
 data/**
