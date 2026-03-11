@@ -1,0 +1,240 @@
+FBMSNet Architecture Diagram
+============================
+
+Input: (batch_size, 9, 22, 1000)
+       │
+       │ 9 frequency bands
+       │ 22 EEG channels  
+       │ 1000 time points (4 seconds × 250 Hz)
+       │
+       ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    BLOCK 1: TEMPORAL CONVOLUTION            │
+│                     (MixedConv2d)                          │
+└─────────────────────────────────────────────────────────────┘
+       │
+       │ Multi-scale temporal kernels:
+       │ • (1,15)  → ~60ms patterns
+       │ • (1,31)  → ~124ms patterns  
+       │ • (1,63)  → ~252ms patterns
+       │ • (1,125) → ~500ms patterns
+       │
+       ▼
+Output: (batch_size, 36, 22, 1000)
+       │
+       │ 36 temporal features
+       │ 22 EEG channels
+       │ 1000 time points
+       │
+       ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    BLOCK 2: SPATIAL CONVOLUTION             │
+│                         (SCB)                              │
+└─────────────────────────────────────────────────────────────┘
+       │
+       │ Spatial kernel: (22, 1)
+       │ Groups: 36 (depthwise separable)
+       │ Expansion factor: 8
+       │
+       ▼
+Output: (batch_size, 288, 1, 1000)
+       │
+       │ 288 spatial features (36 × 8)
+       │ 1 spatial dimension
+       │ 1000 time points
+       │
+       ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    BLOCK 3: TEMPORAL AGGREGATION            │
+│                     (LogVarLayer)                          │
+└─────────────────────────────────────────────────────────────┘
+       │
+       │ Reshape: (batch, 288, 4, 250)
+       │ Stride factor: 4
+       │ Log-variance along time dimension
+       │
+       ▼
+Output: (batch_size, 288, 4, 1)
+       │
+       │ 288 spatial features
+       │ 4 temporal segments
+       │ 1 aggregated dimension
+       │
+       ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    BLOCK 4: CLASSIFICATION                  │
+│                   (Fully Connected)                        │
+└─────────────────────────────────────────────────────────────┘
+       │
+       │ Flatten: (batch, 1152)  # 288 × 4 × 1
+       │ Linear: (1152, 4)
+       │ LogSoftmax
+       │
+       ▼
+Final Output: (batch_size, 4)
+             │
+             │ 4 motor imagery classes:
+             │ • 0: Left hand
+             │ • 1: Right hand  
+             │ • 2: Foot
+             │ • 3: Tongue
+
+Detailed Parameter Flow:
+========================
+
+Input Dimensions:
+- batch_size: Number of trials in batch (e.g., 16)
+- 9: Number of frequency bands (multiview representation)
+- 22: Number of EEG channels (BCI-IV-2a dataset)
+- 1000: Number of time points (4 seconds × 250 Hz)
+
+Block 1 - Temporal Convolution:
+- Input: (batch, 9, 22, 1000)
+- MixedConv2d: 9 → 36 channels
+- Kernel sizes: [(1,15), (1,31), (1,63), (1,125)]
+- Output: (batch, 36, 22, 1000)
+
+Block 2 - Spatial Convolution:
+- Input: (batch, 36, 22, 1000)
+- SCB: 36 → 288 channels (×8 expansion)
+- Kernel: (22, 1) with groups=36
+- Output: (batch, 288, 1, 1000)
+
+Block 3 - Temporal Aggregation:
+- Input: (batch, 288, 1, 1000)
+- Reshape: (batch, 288, 4, 250)  # strideFactor=4
+- LogVarLayer: Compute log-variance along dim=3
+- Output: (batch, 288, 4, 1)
+
+Block 4 - Classification:
+- Input: (batch, 288, 4, 1)
+- Flatten: (batch, 1152)  # 288 × 4 × 1
+- Linear: (1152, 4)
+- LogSoftmax: (batch, 4)
+
+Key Parameters:
+===============
+
+Temporal Convolution:
+- num_Feat = 36: Number of temporal features
+- kernel_sizes = [(1,15), (1,31), (1,63), (1,125)]: Multi-scale kernels
+- stride = 1: No stride in temporal dimension
+- padding = '': Automatic padding
+
+Spatial Convolution:
+- dilatability = 8: Spatial expansion factor
+- max_norm = 2: Weight constraint
+- groups = in_chan: Depthwise separable convolution
+- kernel = (nChan, 1): Spatial kernel size
+
+Temporal Aggregation:
+- strideFactor = 4: Temporal segmentation factor
+- temporalLayer = 'LogVarLayer': Log-variance computation
+- dim = 3: Dimension for variance computation
+
+Classification:
+- max_norm = 0.5: Stricter weight constraint
+- dropoutP = 0.5: Dropout probability
+- LogSoftmax: Numerical stability
+
+Training Parameters:
+===================
+
+Loss Functions:
+- Cross-Entropy Loss: Standard classification loss
+- Center Loss: Feature separation loss
+- Combined: ce_loss + λ × center_loss
+
+Optimization:
+- Optimizer: Adam
+- Learning Rate: 0.001
+- Batch Size: 16
+- Weight Decay: 0.0001
+
+Regularization:
+- Weight Normalization: Prevents gradient explosion
+- Batch Normalization: Accelerates training
+- Dropout: Prevents overfitting
+- Early Stopping: Prevents overfitting
+
+Center Loss:
+- λ = 0.003: Center loss weight
+- feat_dim = 1152: Feature dimension
+- num_classes = 4: Number of classes
+- size_average = True: Average over batch
+
+Data Processing:
+===============
+
+Input Data:
+- Format: (batch, 9, channels, time)
+- 9 frequency bands: [4-8, 8-12, 12-16, 16-20, 20-24, 24-28, 28-32, 32-36, 36-40] Hz
+- Channels: 22 EEG channels
+- Time: 1000 samples (4 seconds at 250 Hz)
+
+Preprocessing:
+- Bandpass filtering: 8-30 Hz
+- Resampling: 250 Hz
+- Epoching: 4-second trials
+- Scaling: ×1e6 (microvolts)
+
+Multiview Creation:
+- Filter bank: 9 frequency bands
+- Butterworth filters: 4th order
+- Overlap: Adjacent bands
+- Output: 9 separate representations
+
+Training Process:
+================
+
+1. Data Loading:
+   - Load multiview data
+   - Create data loaders
+   - Split train/validation/test
+
+2. Model Initialization:
+   - Initialize FBMSNet
+   - Set device (GPU/CPU)
+   - Initialize optimizers
+
+3. Training Loop:
+   - Forward pass
+   - Compute losses
+   - Backward pass
+   - Update parameters
+   - Validation
+
+4. Evaluation:
+   - Test accuracy
+   - Confusion matrix
+   - t-SNE visualization
+   - Save results
+
+Key Features:
+=============
+
+Multi-Scale Learning:
+- Captures temporal patterns at different scales
+- Essential for motor imagery classification
+- Improves feature representation
+
+Spatial Learning:
+- Learns relationships between EEG channels
+- Crucial for brain-computer interfaces
+- Uses depthwise separable convolution
+
+Temporal Aggregation:
+- Log-variance provides robust summarization
+- Reduces dimensionality
+- Preserves important information
+
+Regularization:
+- Multiple regularization techniques
+- Prevents overfitting
+- Improves generalization
+
+Center Loss:
+- Improves feature separability
+- Reduces intra-class variance
+- Increases inter-class separation
+
