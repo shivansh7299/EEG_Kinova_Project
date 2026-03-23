@@ -1926,17 +1926,25 @@
 #     sys.exit(app.exec_())
 
 
-import sys, random, csv, threading, time
+import sys, os, random, csv, threading, time, argparse
+from pathlib import Path
 from datetime import datetime
 from enum import Enum
 from PyQt5.QtCore import QTimer, Qt, QRect, QPoint
-from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QPushButton, QProgressBar, QHBoxLayout
+from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QVBoxLayout, QPushButton,
+                              QProgressBar, QHBoxLayout, QSpinBox, QGroupBox)
 from PyQt5.QtGui import QColor, QPalette, QPainter, QPolygon
-import UnicornPy
 import numpy as np
 
-# Toggle EEG hardware integration
-USE_UNICORN = True
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+try:
+    import UnicornPy
+    USE_UNICORN = True
+except ImportError:
+    UnicornPy = None
+    USE_UNICORN = False
+    print("UnicornPy not found - running in mock mode")
 
 
 # ========== DISPLAY MODE SYSTEM ==========
@@ -2235,7 +2243,7 @@ class MockEEGRecorder(threading.Thread):
 class EEGTrialGUI(QWidget):
     def __init__(self, num_classes=5, trials_per_class=3, baseline_ms=3000, 
                  instruction_display_ms=3000, stim_ms=3000, stabilization_ms=20000, 
-                 display_mode="bar"):
+                 display_mode="bar", subject_no=1):
         super().__init__()
 
         self.num_classes = num_classes
@@ -2243,7 +2251,8 @@ class EEGTrialGUI(QWidget):
         self.baseline_ms = baseline_ms
         self.instruction_display_ms = instruction_display_ms
         self.stim_ms = stim_ms
-        self.stabilization_ms = stabilization_ms  # NEW: stabilization duration
+        self.stabilization_ms = stabilization_ms
+        self.subject_no = subject_no
 
         self.display_mode = display_mode
 
@@ -2267,7 +2276,15 @@ class EEGTrialGUI(QWidget):
         self.phase = "idle"
         self.is_running = False
 
-        self.setWindowTitle(f"EEG Data Collection GUI - {display_mode.upper()} Mode")
+        # Build output folder: data/Subject <N>/<num_classes>_class/
+        subject_folder = PROJECT_ROOT / "data" / f"Subject {self.subject_no}"
+        self.output_dir = subject_folder / f"{num_classes}_class"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        # Also ensure the other class folder exists
+        other_classes = 3 if num_classes == 2 else 2
+        (subject_folder / f"{other_classes}_class").mkdir(parents=True, exist_ok=True)
+
+        self.setWindowTitle(f"EEG Data Collection - Subject {subject_no} - {display_mode.upper()} Mode")
         self.resize(1000, 700)
 
         main_layout = QHBoxLayout()
@@ -2275,7 +2292,7 @@ class EEGTrialGUI(QWidget):
         
         left_layout.addStretch(1)
 
-        self.info_label = QLabel("Press 'Start' to begin data collection")
+        self.info_label = QLabel(f"Subject {subject_no} | {num_classes} Classes | {trials_per_class} Trials\n\nPress 'Start' to begin")
         self.info_label.setAlignment(Qt.AlignCenter)
         self.info_label.setStyleSheet(
             "font-size: 28px; font-weight: 600; color: white; "
@@ -2318,12 +2335,14 @@ class EEGTrialGUI(QWidget):
         self.set_background_color(QColor(0, 0, 0))
 
         filename = f"EEG_{display_mode}_trials_{trials_per_class}_classes_{num_classes}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        self.log_file = open(filename, "w", newline="")
+        filepath = self.output_dir / filename
+        self.log_file = open(filepath, "w", newline="")
         self.csv_writer = csv.writer(self.log_file)
         
         header = ["trial_index", "class_label", "phase", "timestamp"]
         header += [f"Ch{i+1}" for i in range(17)]
         self.csv_writer.writerow(header)
+        print(f"CSV will be saved to: {filepath}")
 
         self.progress_timer = QTimer()
         self.progress_timer.timeout.connect(self.update_progress)
@@ -2473,19 +2492,33 @@ class EEGTrialGUI(QWidget):
 
         self.log_file.close()
         self.set_background_color(QColor(0, 0, 0))
-        self.info_label.setText("EEG data collection\ncompleted!")
+        self.info_label.setText(f"EEG data collection completed!\n\nSaved to:\nSubject {self.subject_no}/{self.num_classes}_class/")
         self.progress.setValue(100)
-        print("CSV saved and experiment ended.")
+        print(f"CSV saved to {self.output_dir} and experiment ended.")
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="EEG Data Collection GUI")
+    parser.add_argument("--subject", type=int, default=1)
+    parser.add_argument("--classes", type=int, default=2)
+    parser.add_argument("--trials", type=int, default=20)
+    parser.add_argument("--baseline", type=int, default=1000)
+    parser.add_argument("--instruction", type=int, default=2000)
+    parser.add_argument("--stimulus", type=int, default=5000)
+    parser.add_argument("--stabilization", type=int, default=20000)
+    parser.add_argument("--display", type=str, default="bar", choices=["bar", "shapes"])
+    args = parser.parse_args()
+
     app = QApplication(sys.argv)
-    
-    # Choose display mode: "bar" or "shapes"
-    # NEW: Added stabilization_ms parameter (default 20 seconds)
-    gui = EEGTrialGUI(num_classes=2, trials_per_class=2, baseline_ms=1000, 
-                      instruction_display_ms=2000, stim_ms=5000, 
-                      stabilization_ms=20000, display_mode="bar")
-    
+    gui = EEGTrialGUI(
+        num_classes=args.classes,
+        trials_per_class=args.trials,
+        baseline_ms=args.baseline,
+        instruction_display_ms=args.instruction,
+        stim_ms=args.stimulus,
+        stabilization_ms=args.stabilization,
+        display_mode=args.display,
+        subject_no=args.subject,
+    )
     gui.show()
     sys.exit(app.exec_())
