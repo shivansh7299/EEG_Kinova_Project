@@ -45,3 +45,4 @@ venv/
 Thumbs.db
 .vscode/
 .idea/
+*.whl

@@ -11,13 +11,14 @@ import os
 import subprocess
 import shutil
 import glob
+import re
 from datetime import datetime
 from pathlib import Path
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QPushButton, QLabel, QTextEdit, QProgressBar, QGroupBox,
-    QSpinBox, QComboBox, QFileDialog, QMessageBox, QCheckBox, QFrame
+    QSpinBox, QComboBox, QFileDialog, QMessageBox, QCheckBox, QFrame, QLineEdit
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont, QPalette, QColor
@@ -25,8 +26,40 @@ from PyQt5.QtGui import QFont, QPalette, QColor
 # Project root
 PROJECT_ROOT = Path(__file__).resolve().parent
 
-# Conda env Python for training / inference (PyTorch, model libs)
-CONDA_PYTHON = PROJECT_ROOT / ".conda" / "python.exe"
+# Conda settings for training / inference (PyTorch, model libs)
+# GUI can run on any Python; heavy scripts can be launched in a separate conda env.
+CONDA_ENV_NAME = os.environ.get("EEG_KINOVA_CONDA_ENV", "torch37")
+
+
+def _resolve_conda_launcher():
+    """Return command prefix used to run Python scripts in the training env."""
+    local_python = PROJECT_ROOT / ".conda" / "python.exe"
+    if local_python.exists():
+        return [str(local_python)], None
+
+    conda_exe = os.environ.get("CONDA_EXE")
+    if conda_exe and Path(conda_exe).exists():
+        return [conda_exe, "run", "--no-capture-output", "-n", CONDA_ENV_NAME, "python"], None
+
+    common_conda = [
+        Path(r"C:\ProgramData\Anaconda3\Scripts\conda.exe"),
+        Path.home() / "anaconda3" / "Scripts" / "conda.exe",
+        Path.home() / "miniconda3" / "Scripts" / "conda.exe",
+    ]
+    for candidate in common_conda:
+        if candidate.exists():
+            return [str(candidate), "run", "--no-capture-output", "-n", CONDA_ENV_NAME, "python"], None
+
+    err = (
+        "No training Python found.\n\n"
+        "Expected one of:\n"
+        f"1) Local env: {local_python}\n"
+        "2) Conda executable in CONDA_EXE\n"
+        "3) Standard Anaconda/Miniconda install path\n\n"
+        f"Current target env name: {CONDA_ENV_NAME}\n"
+        "Set env var EEG_KINOVA_CONDA_ENV if your env has a different name."
+    )
+    return None, err
 
 
 # ============================================================================
@@ -53,6 +86,8 @@ class WorkerThread(QThread):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
             )
@@ -123,6 +158,8 @@ class NotebookWorker(QThread):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
             )
@@ -232,6 +269,7 @@ class PreprocessingTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.workers = []
+        self.current_subject_class_dir = None
         self.setup_ui()
 
     def setup_ui(self):
@@ -291,6 +329,7 @@ class PreprocessingTab(QWidget):
         subj = self.subject_no.value()
         n_class = self.num_classes.value()
         subject_class_dir = PROJECT_ROOT / "data" / f"Subject {subj}" / f"{n_class}_class"
+        self.current_subject_class_dir = subject_class_dir
 
         if not subject_class_dir.exists():
             QMessageBox.warning(
@@ -336,6 +375,7 @@ class PreprocessingTab(QWidget):
 
     def _run_next_notebook(self, notebooks, idx, n_class):
         if idx >= len(notebooks):
+            self._stage_subject_npy_outputs()
             self.log.append("\nAll preprocessing complete!")
             self.run_btn.setEnabled(True)
             return
@@ -359,6 +399,36 @@ class PreprocessingTab(QWidget):
             self.log.append("Preprocessing may have failed. Check log above.")
         self._run_next_notebook(notebooks, idx + 1, n_class)
 
+    def _stage_subject_npy_outputs(self):
+        """Copy generated preprocessing .npy files to selected subject folder for training tab use."""
+        if self.current_subject_class_dir is None:
+            return
+
+        self.current_subject_class_dir.mkdir(parents=True, exist_ok=True)
+        npy_files = [
+            "X_train_eegnet.npy", "y_train_eegnet.npy", "X_test_eegnet.npy", "y_test_eegnet.npy",
+            "X_train_ctnet.npy", "y_train_ctnet.npy", "X_test_ctnet.npy", "y_test_ctnet.npy",
+            "X_train_fbmsnet.npy", "y_train_fbmsnet.npy", "X_test_fbmsnet.npy", "y_test_fbmsnet.npy",
+        ]
+
+        copied = 0
+        for fname in npy_files:
+            src = PROJECT_ROOT / fname
+            if not src.exists():
+                continue
+            dst = self.current_subject_class_dir / fname
+            try:
+                shutil.copy2(src, dst)
+                copied += 1
+                self.log.append(f"Staged {fname} → {dst}")
+            except Exception as e:
+                self.log.append(f"Stage warning for {fname}: {e}")
+
+        if copied == 0:
+            self.log.append("No .npy preprocessing artifacts found in project root to stage.")
+        else:
+            self.log.append(f"Staged {copied} .npy files to subject folder: {self.current_subject_class_dir}")
+
 
 # ============================================================================
 # Tab: Training
@@ -367,6 +437,10 @@ class TrainingTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.worker = None
+        self.total_tasks = 0
+        self.current_task_index = 0
+        self.current_task_name = ""
+        self.current_epoch_total = 0
         self.setup_ui()
 
     def setup_ui(self):
@@ -374,6 +448,22 @@ class TrainingTab(QWidget):
 
         gb = QGroupBox("Training")
         gb_layout = QVBoxLayout()
+
+        row0 = QHBoxLayout()
+        row0.addWidget(QLabel("Subject Number:"))
+        self.subject_no = QSpinBox()
+        self.subject_no.setRange(1, 999)
+        self.subject_no.setValue(1)
+        self.subject_no.valueChanged.connect(self._update_data_dir_for_subject)
+        row0.addWidget(self.subject_no)
+        row0.addWidget(QLabel("Classes:"))
+        self.num_classes = QSpinBox()
+        self.num_classes.setRange(2, 5)
+        self.num_classes.setValue(2)
+        self.num_classes.valueChanged.connect(self._update_data_dir_for_subject)
+        row0.addWidget(self.num_classes)
+        row0.addStretch()
+        gb_layout.addLayout(row0)
 
         self.train_eegnet = QCheckBox("Train EEGNet")
         self.train_eegnet.setChecked(True)
@@ -395,7 +485,12 @@ class TrainingTab(QWidget):
         row.addWidget(self.browse_btn)
         gb_layout.addLayout(row)
 
-        self.data_path = str(PROJECT_ROOT)
+        self.data_path = str(self._subject_data_dir())
+        self.data_dir.setText(self.data_path)
+        self.data_hint = QLabel("")
+        self.data_hint.setStyleSheet("color: #aaa; font-size: 11px;")
+        gb_layout.addWidget(self.data_hint)
+        self._update_data_dir_for_subject()
         gb.setLayout(gb_layout)
         layout.addWidget(gb)
 
@@ -403,6 +498,22 @@ class TrainingTab(QWidget):
         self.run_btn.setStyleSheet("font-size: 14px; padding: 10px; background-color: #FF9800; color: white;")
         self.run_btn.clicked.connect(self.run_training)
         layout.addWidget(self.run_btn)
+
+        self.overall_progress_label = QLabel("Overall progress")
+        layout.addWidget(self.overall_progress_label)
+        self.overall_progress = QProgressBar()
+        self.overall_progress.setRange(0, 100)
+        self.overall_progress.setValue(0)
+        self.overall_progress.setFormat("%p%")
+        layout.addWidget(self.overall_progress)
+
+        self.epoch_progress_label = QLabel("Current model epoch progress")
+        layout.addWidget(self.epoch_progress_label)
+        self.epoch_progress = QProgressBar()
+        self.epoch_progress.setRange(0, 100)
+        self.epoch_progress.setValue(0)
+        self.epoch_progress.setFormat("Waiting for epoch logs...")
+        layout.addWidget(self.epoch_progress)
 
         layout.addWidget(QLabel("Progress / Log:"))
         self.log = QTextEdit()
@@ -417,24 +528,34 @@ class TrainingTab(QWidget):
         if folder:
             self.data_path = folder
             self.data_dir.setText(folder)
+            self.data_hint.setText("Using manually selected data directory.")
+
+    def _subject_data_dir(self):
+        return PROJECT_ROOT / "data" / f"Subject {self.subject_no.value()}" / f"{self.num_classes.value()}_class"
+
+    def _update_data_dir_for_subject(self):
+        path = self._subject_data_dir()
+        self.data_path = str(path)
+        self.data_dir.setText(self.data_path)
+        self.data_hint.setText(f"Auto path from subject/class: {path}")
 
     def run_training(self):
-        if not CONDA_PYTHON.exists():
+        launcher, err = _resolve_conda_launcher()
+        if launcher is None:
             QMessageBox.critical(
                 self, "Conda Env Not Found",
-                f"Conda Python not found at:\n{CONDA_PYTHON}\n\n"
-                "Training requires the conda environment with PyTorch."
+                err
             )
             return
 
-        conda_py = str(CONDA_PYTHON)
+        subject_id = self.subject_no.value()
         tasks = []
         if self.train_eegnet.isChecked():
-            tasks.append(("EEGNet", [conda_py, str(PROJECT_ROOT / "EEGNet_new_training.py")], self.data_path))
+            tasks.append(("EEGNet", launcher + [str(PROJECT_ROOT / "EEGNet_new_training.py"), "--data-dir", self.data_path, "--subject-id", str(subject_id)], self.data_path))
         if self.train_fbmsnet.isChecked():
-            tasks.append(("FBMSNet", [conda_py, str(PROJECT_ROOT / "FBMSNet" / "train_custom_fbmsnet_updated.py")], str(PROJECT_ROOT / "FBMSNet")))
+            tasks.append(("FBMSNet", launcher + [str(PROJECT_ROOT / "FBMSNet" / "train_custom_fbmsnet_updated.py"), "--data-dir", self.data_path, "--subject-id", str(subject_id)], self.data_path))
         if self.train_ctnet.isChecked():
-            tasks.append(("CTNet", [conda_py, str(PROJECT_ROOT / "ctnet_training.py")], self.data_path))
+            tasks.append(("CTNet", launcher + [str(PROJECT_ROOT / "ctnet_training.py"), "--data-dir", self.data_path, "--subject-id", str(subject_id)], self.data_path))
 
         if not tasks:
             QMessageBox.warning(self, "Warning", "Select at least one model to train.")
@@ -458,15 +579,84 @@ class TrainingTab(QWidget):
             return
 
         self.run_btn.setEnabled(False)
+        self.total_tasks = len(tasks)
+        self.current_task_index = 0
+        self.current_task_name = ""
+        self.current_epoch_total = 0
+        self.overall_progress.setValue(0)
+        self.epoch_progress.setRange(0, 100)
+        self.epoch_progress.setValue(0)
+        self.epoch_progress.setFormat("Waiting for epoch logs...")
         self._run_tasks(tasks, 0)
+
+    def _update_overall_progress(self, completed_tasks):
+        if self.total_tasks <= 0:
+            self.overall_progress.setValue(0)
+            return
+        pct = int((completed_tasks / self.total_tasks) * 100)
+        self.overall_progress.setValue(max(0, min(100, pct)))
+
+    def _set_epoch_total(self, total):
+        if total <= 0:
+            return
+        self.current_epoch_total = total
+        self.epoch_progress.setRange(0, total)
+        self.epoch_progress.setValue(0)
+        self.epoch_progress.setFormat("%v/%m epochs")
+
+    def _update_epoch_progress(self, current, total=None):
+        if total is not None and total > 0 and total != self.current_epoch_total:
+            self._set_epoch_total(total)
+        if self.current_epoch_total <= 0:
+            return
+        current = max(0, min(current, self.current_epoch_total))
+        self.epoch_progress.setValue(current)
+
+    def _parse_progress_from_line(self, line):
+        # Patterns like: "Epoch [3/250]" or "Epoch 003/300"
+        m = re.search(r"Epoch\s*\[?\s*(\d+)\s*/\s*(\d+)\s*\]?", line, re.IGNORECASE)
+        if m:
+            self._update_epoch_progress(int(m.group(1)), int(m.group(2)))
+            return
+
+        # Pattern like: "Training for 300 epochs"
+        m = re.search(r"training\s+for\s+(\d+)\s+epochs", line, re.IGNORECASE)
+        if m:
+            self._set_epoch_total(int(m.group(1)))
+            return
+
+        # tqdm-like fallback line with "Epochs" and "x/y"
+        if "epoch" in line.lower():
+            m = re.search(r"(\d+)\s*/\s*(\d+)", line)
+            if m:
+                cur = int(m.group(1))
+                total = int(m.group(2))
+                if 1 <= cur <= total <= 5000:
+                    self._update_epoch_progress(cur, total)
+
+    def _on_worker_output(self, text):
+        self.log.append(text)
+        self._parse_progress_from_line(text)
 
     def _run_tasks(self, tasks, idx):
         if idx >= len(tasks):
             self.log.append("\nAll training complete! Check model accuracy above.")
+            self._update_overall_progress(self.total_tasks)
+            if self.current_epoch_total > 0:
+                self.epoch_progress.setValue(self.current_epoch_total)
             self.run_btn.setEnabled(True)
             return
 
         name, cmd, cwd = tasks[idx]
+        self.current_task_index = idx
+        self.current_task_name = name
+        self.current_epoch_total = 0
+        self._update_overall_progress(idx)
+        self.overall_progress_label.setText(f"Overall progress: model {idx + 1}/{len(tasks)} ({name})")
+        self.epoch_progress_label.setText(f"{name} epoch progress")
+        # Show busy state immediately so the GUI doesn't look frozen while waiting for first epoch logs.
+        self.epoch_progress.setRange(0, 0)
+        self.epoch_progress.setFormat("Running... waiting for first epoch output")
         self.log.append(f"\n[{datetime.now().strftime('%H:%M:%S')}] Starting {name} training...")
 
         env = os.environ.copy()
@@ -493,7 +683,7 @@ class TrainingTab(QWidget):
                     self.log.append(f"Copied {f} to FBMSNet/data/")
 
         worker = WorkerThread(cmd, cwd=cwd, env=env)
-        worker.output.connect(lambda t: self.log.append(t))
+        worker.output.connect(self._on_worker_output)
         worker.finished_signal.connect(
             lambda code, msg: self._on_train_done(code, msg, tasks, idx)
         )
@@ -502,6 +692,9 @@ class TrainingTab(QWidget):
 
     def _on_train_done(self, code, msg, tasks, idx):
         self.log.append(f"Training finished (exit code {code}).")
+        if self.current_epoch_total > 0:
+            self.epoch_progress.setValue(self.current_epoch_total)
+        self._update_overall_progress(idx + 1)
         self._run_tasks(tasks, idx + 1)
 
 
@@ -525,8 +718,31 @@ class EEGOnlyTab(QWidget):
         self.model_combo = QComboBox()
         self.model_combo.addItems(["EEGNet", "FBMSNet", "CTNet"])
         row.addWidget(self.model_combo)
+        row.addWidget(QLabel("Subject:"))
+        self.subject_no = QSpinBox()
+        self.subject_no.setRange(1, 999)
+        self.subject_no.setValue(1)
+        row.addWidget(self.subject_no)
+        row.addWidget(QLabel("Classes:"))
+        self.num_classes = QSpinBox()
+        self.num_classes.setRange(2, 5)
+        self.num_classes.setValue(2)
+        row.addWidget(self.num_classes)
         row.addStretch()
         gb_layout.addLayout(row)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Model checkpoint (.pth):"))
+        self.model_path_input = QLineEdit()
+        self.model_path_input.setPlaceholderText("Optional: choose from subject results/checkpoints")
+        row2.addWidget(self.model_path_input)
+        self.pick_latest_btn = QPushButton("Use Latest Subject Model")
+        self.pick_latest_btn.clicked.connect(self.pick_latest_subject_model)
+        row2.addWidget(self.pick_latest_btn)
+        self.browse_model_btn = QPushButton("Browse")
+        self.browse_model_btn.clicked.connect(self.browse_model_file)
+        row2.addWidget(self.browse_model_btn)
+        gb_layout.addLayout(row2)
 
         gb.setLayout(gb_layout)
         layout.addWidget(gb)
@@ -544,17 +760,54 @@ class EEGOnlyTab(QWidget):
 
         self.setLayout(layout)
 
+    def browse_model_file(self):
+        start_dir = PROJECT_ROOT / "results"
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select model checkpoint",
+            str(start_dir),
+            "PyTorch model (*.pth);;All files (*)",
+        )
+        if file_path:
+            self.model_path_input.setText(file_path)
+
+    def pick_latest_subject_model(self):
+        model_name = self.model_combo.currentText()
+        subject_dir = PROJECT_ROOT / "results" / f"Subject_{self.subject_no.value():02d}" / f"{self.num_classes.value()}_class" / model_name
+        if not subject_dir.exists():
+            QMessageBox.warning(self, "Not Found", f"Subject model folder not found:\n{subject_dir}")
+            return
+
+        run_dirs = sorted([p for p in subject_dir.iterdir() if p.is_dir() and p.name.startswith("run_")], key=lambda p: p.stat().st_mtime, reverse=True)
+        for run_dir in run_dirs:
+            checkpoints_dir = run_dir / "checkpoints"
+            if not checkpoints_dir.exists():
+                continue
+            candidates = sorted(checkpoints_dir.glob("*best*.pth"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if not candidates:
+                candidates = sorted(checkpoints_dir.glob("*.pth"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if candidates:
+                self.model_path_input.setText(str(candidates[0]))
+                self.log.append(f"Selected latest subject model: {candidates[0]}")
+                return
+
+        QMessageBox.warning(self, "Not Found", f"No .pth model found in:\n{subject_dir}")
+
     def run_eeg_only(self):
-        if not CONDA_PYTHON.exists():
-            QMessageBox.critical(self, "Conda Env Not Found",
-                                 f"Conda Python not found at:\n{CONDA_PYTHON}")
+        launcher, err = _resolve_conda_launcher()
+        if launcher is None:
+            QMessageBox.critical(self, "Conda Env Not Found", err)
             return
         model_name = self.model_combo.currentText()
+        model_path = self.model_path_input.text().strip()
         self.log.append(f"Launching EEG-only Kinova control with {model_name}...")
         try:
             script = PROJECT_ROOT / "kinova_eeg_controller.py"
+            cmd = launcher + [str(script), "--model", model_name]
+            if model_path:
+                cmd += ["--model-path", model_path]
             subprocess.Popen(
-                [str(CONDA_PYTHON), str(script), "--model", model_name],
+                cmd,
                 cwd=str(PROJECT_ROOT),
                 creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0
             )
@@ -587,7 +840,30 @@ class EEGOpenCVTab(QWidget):
         self.model_combo = QComboBox()
         self.model_combo.addItems(["EEGNet", "FBMSNet", "CTNet"])
         row.addWidget(self.model_combo)
+        row.addWidget(QLabel("Subject:"))
+        self.subject_no = QSpinBox()
+        self.subject_no.setRange(1, 999)
+        self.subject_no.setValue(1)
+        row.addWidget(self.subject_no)
+        row.addWidget(QLabel("Classes:"))
+        self.num_classes = QSpinBox()
+        self.num_classes.setRange(2, 5)
+        self.num_classes.setValue(2)
+        row.addWidget(self.num_classes)
         gb_layout.addLayout(row)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Model checkpoint (.pth):"))
+        self.model_path_input = QLineEdit()
+        self.model_path_input.setPlaceholderText("Optional: choose from subject results/checkpoints")
+        row2.addWidget(self.model_path_input)
+        self.pick_latest_btn = QPushButton("Use Latest Subject Model")
+        self.pick_latest_btn.clicked.connect(self.pick_latest_subject_model)
+        row2.addWidget(self.pick_latest_btn)
+        self.browse_model_btn = QPushButton("Browse")
+        self.browse_model_btn.clicked.connect(self.browse_model_file)
+        row2.addWidget(self.browse_model_btn)
+        gb_layout.addLayout(row2)
 
         gb.setLayout(gb_layout)
         layout.addWidget(gb)
@@ -605,17 +881,54 @@ class EEGOpenCVTab(QWidget):
 
         self.setLayout(layout)
 
+    def browse_model_file(self):
+        start_dir = PROJECT_ROOT / "results"
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select model checkpoint",
+            str(start_dir),
+            "PyTorch model (*.pth);;All files (*)",
+        )
+        if file_path:
+            self.model_path_input.setText(file_path)
+
+    def pick_latest_subject_model(self):
+        model_name = self.model_combo.currentText()
+        subject_dir = PROJECT_ROOT / "results" / f"Subject_{self.subject_no.value():02d}" / f"{self.num_classes.value()}_class" / model_name
+        if not subject_dir.exists():
+            QMessageBox.warning(self, "Not Found", f"Subject model folder not found:\n{subject_dir}")
+            return
+
+        run_dirs = sorted([p for p in subject_dir.iterdir() if p.is_dir() and p.name.startswith("run_")], key=lambda p: p.stat().st_mtime, reverse=True)
+        for run_dir in run_dirs:
+            checkpoints_dir = run_dir / "checkpoints"
+            if not checkpoints_dir.exists():
+                continue
+            candidates = sorted(checkpoints_dir.glob("*best*.pth"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if not candidates:
+                candidates = sorted(checkpoints_dir.glob("*.pth"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if candidates:
+                self.model_path_input.setText(str(candidates[0]))
+                self.log.append(f"Selected latest subject model: {candidates[0]}")
+                return
+
+        QMessageBox.warning(self, "Not Found", f"No .pth model found in:\n{subject_dir}")
+
     def run_eeg_opencv(self):
-        if not CONDA_PYTHON.exists():
-            QMessageBox.critical(self, "Conda Env Not Found",
-                                 f"Conda Python not found at:\n{CONDA_PYTHON}")
+        launcher, err = _resolve_conda_launcher()
+        if launcher is None:
+            QMessageBox.critical(self, "Conda Env Not Found", err)
             return
         model_name = self.model_combo.currentText()
+        model_path = self.model_path_input.text().strip()
         self.log.append(f"Launching EEG + OpenCV Kinova control with {model_name}...")
         try:
             script = PROJECT_ROOT / "kinova_eeg_opencv_controller.py"
+            cmd = launcher + [str(script), "--model", model_name]
+            if model_path:
+                cmd += ["--model-path", model_path]
             subprocess.Popen(
-                [str(CONDA_PYTHON), str(script), "--model", model_name],
+                cmd,
                 cwd=str(PROJECT_ROOT),
                 creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0
             )

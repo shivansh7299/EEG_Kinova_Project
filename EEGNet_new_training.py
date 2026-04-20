@@ -10,20 +10,27 @@
 # # - Works with preprocessed .npy files
 # # ============================================================================
 
+import argparse
+import json
+import os
+import sys
+from collections import Counter
+from pathlib import Path
+
+import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.model_selection import train_test_split
-import matplotlib.pyplot as plt
-import os
-import sys
-import json
-import pandas as pd
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
-from collections import Counter
+
+from training_artifacts import build_run_paths, save_classification_outputs, save_confusion_matrix_figure
+
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 # Force flush output (Windows fix)
 sys.stdout.flush()
@@ -41,7 +48,7 @@ class EEGDatasetWithWindowing(Dataset):
     Creates overlapping windows from longer trials to increase dataset size.
     """
     
-    def __init__(self, X, y, window_size=250, step_size=75, augment=False):
+    def __init__(self, X, y, window_size=500, step_size=250, augment=False):
         """
         Args:
             X: EEG data of shape (N, C, T) or (N, 1, C, T)
@@ -230,6 +237,7 @@ def validate(model, dataloader, loss_fn, device):
 # ============================================================================
 def train_eegnet(
     data_dir="",
+    subject_id=None,
     use_windowing=True,
     window_size=250,      # 1 second at 250 Hz
     step_size=75,         # 0.3 seconds (70% overlap)
@@ -302,8 +310,20 @@ def train_eegnet(
     n_channels = X_train.shape[1]
     n_timepoints = X_train.shape[2]
     num_classes = len(np.unique(y_train))
+    results_paths = build_run_paths(
+        PROJECT_ROOT,
+        "EEGNet",
+        data_dir,
+        num_classes=num_classes,
+        subject_no=subject_id,
+    )
+    save_prefix = str(results_paths["checkpoints_dir"] / "eegnet_new")
+    figures_dir = results_paths["figures_dir"]
+    metrics_dir = results_paths["metrics_dir"]
+    run_dir = results_paths["run_dir"]
     
     print(f"✅ Data shape: (N, {n_channels}, {n_timepoints})")
+    print(f"Results directory: {run_dir}")
     
     # -----------------------------------------------
     # STEP 2 — TRAIN/VAL SPLIT
@@ -589,13 +609,13 @@ def train_eegnet(
     # Classification report
     class_labels = [f"Class {i}" for i in range(num_classes)]
     print("\nClassification Report:")
-    print(classification_report(all_true, all_preds, target_names=class_labels))
+    report_text = classification_report(all_true, all_preds, target_names=class_labels, zero_division=0)
+    print(report_text)
+    save_classification_outputs(metrics_dir, all_true, all_preds, class_labels, "eegnet_new")
     
     # -----------------------------------------------
     # STEP 9 — PLOTS AND VISUALIZATIONS
     # -----------------------------------------------
-    os.makedirs("output", exist_ok=True)
-    
     # Training curves
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     
@@ -642,7 +662,7 @@ def train_eegnet(
     axes[1, 1].grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig("./output/eegnet_new_training_curves.png", dpi=300)
+    plt.savefig(figures_dir / "eegnet_new_training_curves.png", dpi=300)
     plt.show()
     
     # Confusion Matrix
@@ -668,12 +688,20 @@ def train_eegnet(
             )
     
     plt.tight_layout()
-    plt.savefig("./output/eegnet_new_confusion_matrix.png", dpi=300)
+    plt.savefig(figures_dir / "eegnet_new_confusion_matrix.png", dpi=300)
     plt.show()
+
+    save_confusion_matrix_figure(
+        figures_dir / "eegnet_new_confusion_matrix_clean.png",
+        cm,
+        class_labels,
+        f"EEGNet Improved - Test Accuracy: {test_acc:.2f}%",
+    )
     
-    print("\n✅ All visualizations saved to ./output/")
+    print(f"\n✅ All visualizations saved to {figures_dir}")
     print(f"✅ Best model saved: {best_path}")
     print(f"✅ Last model saved: {last_path}")
+    print(f"✅ Metrics saved to: {metrics_dir}")
     
     return model, hist_df, best_path, test_acc
 
@@ -682,21 +710,33 @@ def train_eegnet(
 # MAIN ENTRY POINT
 # ============================================================================
 if __name__ == "__main__":
-    # Configuration
+    parser = argparse.ArgumentParser(description="Train improved EEGNet with subject-aware outputs.")
+    parser.add_argument("--data-dir", default="", help="Directory containing X_train_eegnet.npy and related files")
+    parser.add_argument("--subject-id", type=int, default=None, help="Optional subject id used for results folder naming")
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--epochs", type=int, default=300)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--dropout-rate", type=float, default=0.7)
+    parser.add_argument("--f1", type=int, default=16)
+    parser.add_argument("--patience", type=int, default=100)
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
     config = {
-        "data_dir": "",  # Directory with .npy files (empty = current directory)
-        "use_windowing": True,  # Enable windowing strategy
-        "window_size": 250,     # 1 second at 250 Hz
-        "step_size": 75,        # 0.3 seconds (70% overlap)
-        "batch_size": 16,
-        "epochs": 300,
-        "lr": 1e-4,
-        "weight_decay": 1e-4,
-        "dropout_rate": 0.7,
-        "F1": 16,               # More filters
-        "patience": 100,
-        "save_prefix": "outputs/eegnet_new",
-        "seed": 42
+        "data_dir": args.data_dir,
+        "subject_id": args.subject_id,
+        "use_windowing": True,
+        "window_size": 250,
+        "step_size": 75,
+        "batch_size": args.batch_size,
+        "epochs": args.epochs,
+        "lr": args.lr,
+        "weight_decay": args.weight_decay,
+        "dropout_rate": args.dropout_rate,
+        "F1": args.f1,
+        "patience": args.patience,
+        "seed": args.seed,
     }
     
     print("=" * 80)

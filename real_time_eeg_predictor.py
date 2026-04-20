@@ -18,7 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 from hardware_config import EEG_FS
 FS = EEG_FS
 N_CHANNELS = 8
-WINDOW_SAMPLES = 250  # 1 second
+WINDOW_SAMPLES = 500  # 2 second #250 for 1 sec
 LOWCUT = 4
 HIGHCUT = 40
 FILTER_ORDER = 5
@@ -60,6 +60,7 @@ class RealTimeEEGPredictor:
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
         self.num_classes = 2
+        self.window_samples = WINDOW_SAMPLES
         self.buffer = []
         self.model_path = model_path or self._find_model_path()
 
@@ -86,6 +87,34 @@ class RealTimeEEGPredictor:
                 return str(p)
         raise FileNotFoundError(f"No {self.model_name} model found. Train first. Looked in: {candidates}")
 
+    def _infer_eegnet_window_samples(self, state):
+        """Infer EEG window length from checkpoint classifier shape when available."""
+        from EEGNet_new_model import EEGNet
+
+        target_in_features = None
+        for k, v in state.items():
+            if k.endswith("classify.weight") and hasattr(v, "shape") and len(v.shape) == 2:
+                target_in_features = int(v.shape[1])
+                break
+
+        if target_in_features is None:
+            return WINDOW_SAMPLES
+
+        candidates = [WINDOW_SAMPLES, 250, 500, 750, 1000]
+        seen = set()
+        for samples in candidates:
+            if samples in seen:
+                continue
+            seen.add(samples)
+            try:
+                probe = EEGNet(num_classes=self.num_classes, num_channels=N_CHANNELS, num_samples=samples)
+                if probe.classify.weight.shape[1] == target_in_features:
+                    return samples
+            except Exception:
+                continue
+
+        return WINDOW_SAMPLES
+
     def _load_model(self):
         if self.model_name == "EEGNet":
             from EEGNet_new_model import EEGNet
@@ -96,8 +125,10 @@ class RealTimeEEGPredictor:
             else:
                 state = ckpt
                 self.num_classes = 2
+
+            self.window_samples = self._infer_eegnet_window_samples(state)
             self.model = EEGNet(num_classes=self.num_classes, num_channels=N_CHANNELS,
-                               num_samples=WINDOW_SAMPLES).to(self.device)
+                               num_samples=self.window_samples).to(self.device)
             self.model.load_state_dict(state, strict=False)
         elif self.model_name == "CTNet":
             from ctnet_model import CTNetLite
@@ -114,6 +145,7 @@ class RealTimeEEGPredictor:
                         self.num_classes = v.shape[0]
                         break
                 self.num_classes = self.num_classes or 2
+            self.window_samples = WINDOW_SAMPLES
             self.model = CTNetLite(n_channels=N_CHANNELS, n_timepoints=WINDOW_SAMPLES,
                                    n_classes=self.num_classes).to(self.device)
             self.model.load_state_dict(state, strict=False)
@@ -123,6 +155,7 @@ class RealTimeEEGPredictor:
             ckpt = torch.load(self.model_path, map_location=self.device)
             state = ckpt.get("model_state_dict", ckpt)
             self.num_classes = ckpt.get("num_classes", 2)
+            self.window_samples = WINDOW_SAMPLES
             # FBMSNet expects (batch, 9, 8, 248) - multiband
             self.model = FBMSNet(nChan=8, nTime=248, nClass=self.num_classes,
                                  temporalLayer='LogVarLayer', num_Feat=36,
@@ -141,17 +174,17 @@ class RealTimeEEGPredictor:
         for row in samples:
             self.buffer.append(row.tolist())
         # Keep only last WINDOW_SAMPLES
-        if len(self.buffer) > WINDOW_SAMPLES:
-            self.buffer = self.buffer[-WINDOW_SAMPLES:]
+        if len(self.buffer) > self.window_samples:
+            self.buffer = self.buffer[-self.window_samples:]
 
     def predict(self):
         """
         Run prediction on current buffer. Returns (class_idx, probs) or (None, None) if insufficient data.
         """
-        if len(self.buffer) < WINDOW_SAMPLES:
+        if len(self.buffer) < self.window_samples:
             return None, None
 
-        window = np.array(self.buffer[-WINDOW_SAMPLES:], dtype=np.float32)  # (250, 8)
+        window = np.array(self.buffer[-self.window_samples:], dtype=np.float32)
 
         # Preprocess
         filtered = bandpass_filter(window)

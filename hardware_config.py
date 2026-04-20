@@ -11,9 +11,10 @@
 ROBOT_IP = "192.168.1.10"
 USERNAME = "admin"
 PASSWORD = "admin"
-ANGLES_INIT = [101.9, 39.18, 177.13, 246.77, 285.5, 86.98, 120.09]
+# ANGLES_INIT = [101.9, 39.18, 177.13, 246.77, 285.5, 86.98, 120.09]
+ANGLES_INIT = [97.39, 41.8, 194.35, 232.9, 317.41, 86.03, 86.24]
 LIMIT_M = 0.35
-V_MAX = 0.17
+V_MAX = 0.1
 AX_MAX = 0.80
 
 # Camera (for Option 6 / track_ball)
@@ -48,5 +49,6 @@ KF_MEAS_STD_PX = 4.0
 KF_ACCEL_STD = 600.0
 
 # ====== EEG HEADSET (mirrors dataCollection.py UnicornRecorder) ======
-EEG_FS = 250
+# EEG_FS = 250
+EEG_FS = 500
 EEG_SAMPLES_PER_READ = 4

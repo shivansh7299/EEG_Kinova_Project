@@ -1,0 +1,6 @@
+{
+  "best_val_acc": 99.10714285714286,
+  "test_acc": 78.125,
+  "num_classes": 2,
+  "epochs": 300
+}

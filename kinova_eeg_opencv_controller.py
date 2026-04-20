@@ -4,7 +4,7 @@
 # EEG model predicts direction. OpenCV tracks ball/bar.
 # If EEG prediction MATCHES OpenCV direction → arm moves FAST.
 # If EEG prediction MISMATCHES OpenCV direction → arm moves SLOW.
-# Usage: python kinova_eeg_opencv_controller.py [--model EEGNet|FBMSNet|CTNet]
+# Usage: python kinova_eeg_opencv_controller.py [--model EEGNet|FBMSNet|CTNet] [--model-path path/to/model.pth]
 # ============================================================================
 
 import sys
@@ -269,6 +269,7 @@ class EEGStream:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", choices=["EEGNet", "FBMSNet", "CTNet"], default="CTNet")
+    parser.add_argument("--model-path", default="", help="Optional checkpoint path (.pth). Overrides default model lookup.")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -277,7 +278,10 @@ def main():
 
     # Load predictor
     try:
-        predictor = RealTimeEEGPredictor(model_name=args.model)
+        predictor = RealTimeEEGPredictor(
+            model_name=args.model,
+            model_path=(args.model_path.strip() or None),
+        )
         num_classes = predictor.num_classes
         print(f"Loaded {args.model} with {num_classes} classes")
     except FileNotFoundError as e:

@@ -2147,13 +2147,41 @@ class UnicornRecorder(threading.Thread):
         total_samples = 0
         discarded_samples = 0
         last_flush_time = time.time()
+        consecutive_read_errors = 0
+        max_consecutive_errors = 40
         
         time.sleep(0.5)
         
         try:
             while self.running:
                 receive_buffer = bytearray(buffer_size)
-                self.device.GetData(samples_per_read, receive_buffer, buffer_size)
+                try:
+                    self.device.GetData(samples_per_read, receive_buffer, buffer_size)
+                    consecutive_read_errors = 0
+                except Exception as e:
+                    consecutive_read_errors += 1
+                    print(
+                        f"EEG read warning ({consecutive_read_errors}/{max_consecutive_errors}): {e}"
+                    )
+
+                    # Try to recover from transient Bluetooth/USB hiccups.
+                    if consecutive_read_errors >= max_consecutive_errors:
+                        print("Too many consecutive read errors. Restarting acquisition...")
+                        try:
+                            self.device.StopAcquisition()
+                        except Exception:
+                            pass
+                        try:
+                            self.device.StartAcquisition(False)
+                            consecutive_read_errors = 0
+                            print("Acquisition restart successful.")
+                        except Exception as restart_err:
+                            print(f"Acquisition restart failed: {restart_err}")
+                            raise
+
+                    time.sleep(0.02)
+                    continue
+
                 data = np.frombuffer(receive_buffer, dtype=np.float32)
                 data = data.reshape((samples_per_read, self.num_channels))
                 
@@ -2265,7 +2293,7 @@ class EEGTrialGUI(QWidget):
             # QColor(255, 0, 255),
         ]
         self.class_colors = {i + 1: color_pool[i] for i in range(num_classes)}
-        self.color_names = {1: "Red",2: "Red"}
+        self.color_names = {1: "Up (Right Arm)",2: "Down (Left Arm)"}
                             #  2: "Green", 3: "Blue", 4: "Yellow", 5: "Magenta"}
 
         self.trial_order = [c for c in range(1, num_classes + 1) for _ in range(trials_per_class)]
@@ -2376,7 +2404,7 @@ class EEGTrialGUI(QWidget):
             self.info_label.setText("Mock mode - Starting stabilization...")
         
         # Start stabilization phase instead of going directly to trials
-        # QTimer.singleShot(1000, self.show_stabilization)
+        QTimer.singleShot(1000, self.show_stabilization)
 
     def show_stabilization(self):
         """NEW: Stabilization phase - no data recording"""

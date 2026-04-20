@@ -786,15 +786,22 @@
 # Supports: 8-channel, 250 Hz, 1-second EEG trials (8 x 250)
 # ============================================================================
 
+import argparse
+import os
+import sys
+from pathlib import Path
+
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from sklearn.metrics import confusion_matrix, classification_report
+from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.model_selection import train_test_split
-import matplotlib.pyplot as plt
-import os
-import sys
+
+from training_artifacts import build_run_paths, save_classification_outputs, save_confusion_matrix_figure, save_json
+
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 # Force flush output (Windows fix)
 sys.stdout.flush()
@@ -838,7 +845,7 @@ from ctnet_model import CTNet, CTNetLite
 # ============================================================================
 # TRAINING FUNCTION
 # ============================================================================
-def train_ctnet():
+def train_ctnet(data_dir="", subject_id=None):
 
     print("=" * 80)
     print("🚀 CTNet Training (8 ch, 250 Hz, 1s Window)")
@@ -853,8 +860,6 @@ def train_ctnet():
     #   - 'automatic': Uses data_curation.py pipeline (uniform_len -> filter -> zscore_normalize)
     #   - 'trial_index': Uses original notebook pipeline (filter -> baseline_norm -> StandardScaler)
     # Both methods produce the same output format: (N, 8, 250)
-    
-    data_dir = ""  # put dataset folder path if needed
 
     print("\n📂 Loading preprocessed EEG data...")
     print("   Expected format: (N, 8, 250) - (samples, channels, timepoints)")
@@ -889,8 +894,20 @@ def train_ctnet():
     print(f"Final train shape: {X_train.shape} (N, C, T)")
 
     num_classes = len(np.unique(y_train))
+    results_paths = build_run_paths(
+        PROJECT_ROOT,
+        "CTNet",
+        data_dir,
+        num_classes=num_classes,
+        subject_no=subject_id,
+    )
+    figures_dir = results_paths["figures_dir"]
+    metrics_dir = results_paths["metrics_dir"]
+    checkpoints_dir = results_paths["checkpoints_dir"]
+    run_dir = results_paths["run_dir"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\nUsing device: {device}")
+    print(f"Results directory: {run_dir}")
 
     # -----------------------------------------------
     # STEP 2 — TRAIN/VAL SPLIT
@@ -954,34 +971,34 @@ def train_ctnet():
     # Use full CTNet with reduced layers for better capacity (even for small datasets)
     # CTNetLite is too simple and underfits
     print("Using Lite CTNet with optimized architecture for small dataset.")
-    # model = CTNet(
-    #     n_channels=n_channels,
-    #     n_timepoints=n_timepoints,
-    #     n_classes=num_classes,
-    #     sampling_rate=250,
-    #     F1=8,
-    #     D=2,
-    #     F2=16,
-    #     Kc1=None,
-    #     Kc2=16,
-    #     P1=8,
-    #     P2=2,
-    #     dropout_conv=0.5,  # Moderate dropout
-    #     n_heads=2,
-    #     n_layers=2,  # Reduced from 6 to prevent overfitting, but more than Lite
-    #     ff_mult=4,
-    #     dropout_transformer=0.1,
-    #     use_positional_encoding=True,
-    #     classifier_dropout=0.4
-    # ).to(device)
-    model = CTNetLite(
-            n_channels=n_channels,
-            n_timepoints=n_timepoints,
-            n_classes=num_classes,
-            # dropout_conv=0.7  # Validation Accuracy: 42.55% Test Accuracy:      29.17%
-            dropout_conv=0.5 #-  Validation Accuracy = 57.45% Test Accuracy =  47%
-            # Final Test Accuracy: 50.00% Best Val Accuracy:      61.70%
-        ).to(device)
+    model = CTNet(
+        n_channels=n_channels,
+        n_timepoints=n_timepoints,
+        n_classes=num_classes,
+        sampling_rate=250,
+        F1=8,
+        D=2,
+        F2=16,
+        Kc1=None,
+        Kc2=16,
+        P1=8,
+        P2=2,
+        dropout_conv=0.5,  # Moderate dropout
+        n_heads=2,
+        n_layers=2,  # Reduced from 6 to prevent overfitting, but more than Lite
+        ff_mult=4,
+        dropout_transformer=0.1,
+        use_positional_encoding=True,
+        classifier_dropout=0.4
+    ).to(device)
+    # model = CTNetLite(
+    #         n_channels=n_channels,
+    #         n_timepoints=n_timepoints,
+    #         n_classes=num_classes,
+    #         dropout_conv=0.7  # Validation Accuracy: 42.55% Test Accuracy:      29.17%
+    #         #dropout_conv=0.5 #-  Validation Accuracy = 57.45% Test Accuracy =  47%
+    #         # Final Test Accuracy: 50.00% Best Val Accuracy:      61.70%
+    #     ).to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total Parameters: {total_params:,}")
@@ -1015,14 +1032,15 @@ def train_ctnet():
             return focal_loss.mean()
     
     # Use focal loss to force learning of all classes
-    criterion = FocalLoss(class_weights, alpha=0.25, gamma=1.0)
-    # criterion = nn.CrossEntropyLoss(weight=class_weights)
+    # criterion = FocalLoss(class_weights, alpha=0.25, gamma=1.0)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
 
     # -----------------------------------------------
     # STEP 5 — LEARNING RATE SEARCH
     # -----------------------------------------------
     # Learning rates to test
-    learning_rates = [1e-4, 3e-4, 1e-3, 3e-3, 1e-2]
+    # learning_rates = [1e-4, 3e-4, 1e-3, 3e-3, 1e-2]
+    learning_rates = [1e-3]
     num_epochs = 300  # Fixed 300 epochs per learning rate
     
     # Store results for each learning rate
@@ -1129,7 +1147,7 @@ def train_ctnet():
                 patience_counter = 0
                 
                 # Save model for this specific LR
-                model_path = f"ctnet_best_model_lr_{lr:.6f}.pth"
+                model_path = checkpoints_dir / f"ctnet_best_model_lr_{lr:.6f}.pth"
                 torch.save(
                     {
                         "model_state_dict": model.state_dict(),
@@ -1138,7 +1156,7 @@ def train_ctnet():
                         "val_acc": val_acc,
                         "lr": lr
                     },
-                    model_path
+                    str(model_path)
                 )
                 
                 if (epoch + 1) % 25 == 0 or epoch < 5:
@@ -1156,7 +1174,7 @@ def train_ctnet():
         lr_results[lr] = {
             'best_val_acc': best_val_acc_lr,
             'best_epoch': best_epoch_lr,
-            'model_path': f"ctnet_best_model_lr_{lr:.6f}.pth"
+            'model_path': str(checkpoints_dir / f"ctnet_best_model_lr_{lr:.6f}.pth")
         }
         
         print(f"\n✅ LR {lr:.6f} Complete:")
@@ -1235,7 +1253,7 @@ def train_ctnet():
     # -----------------------------------------------
     # STEP 9 — PLOTS
     # -----------------------------------------------
-    os.makedirs("output", exist_ok=True)
+    save_json(metrics_dir / "ctnet_lr_search_results.json", {str(k): v for k, v in lr_results.items()})
 
     # Learning Rate Search Results Plot
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
@@ -1274,7 +1292,7 @@ def train_ctnet():
                     f'{acc:.1f}%', ha='center', va='bottom', fontsize=10, fontweight='bold')
 
     plt.tight_layout()
-    plt.savefig("./output/ctnet_lr_search_results.png", dpi=300, bbox_inches='tight')
+    plt.savefig(figures_dir / "ctnet_lr_search_results.png", dpi=300, bbox_inches='tight')
     plt.show()
 
     # Confusion Matrix
@@ -1295,8 +1313,16 @@ def train_ctnet():
                      color="white" if cm[i, j] > cm.max()/2 else "black")
 
     plt.tight_layout()
-    plt.savefig("./output/ctnet_confusion_matrix.png", dpi=300)
+    plt.savefig(figures_dir / "ctnet_confusion_matrix.png", dpi=300)
     plt.show()
+
+    save_classification_outputs(metrics_dir, all_true, all_preds, class_labels, "ctnet")
+    save_confusion_matrix_figure(
+        figures_dir / "ctnet_confusion_matrix_clean.png",
+        cm,
+        class_labels,
+        f"CTNet Confusion Matrix (Test Acc {test_acc:.2f}%)",
+    )
 
     return test_acc, best_overall_acc, best_lr, lr_results
 
@@ -1305,7 +1331,12 @@ def train_ctnet():
 # MAIN ENTRY (REQUIRED FOR WINDOWS)
 # ============================================================================
 if __name__ == "__main__":
-    test_acc, val_acc, best_lr, lr_results = train_ctnet()
+    parser = argparse.ArgumentParser(description="Train CTNet and save subject-aware results.")
+    parser.add_argument("--data-dir", default="", help="Directory containing X_train_ctnet.npy and related files")
+    parser.add_argument("--subject-id", type=int, default=None, help="Optional subject id used for results folder naming")
+    args = parser.parse_args()
+
+    test_acc, val_acc, best_lr, lr_results = train_ctnet(data_dir=args.data_dir, subject_id=args.subject_id)
 
     print("\n" + "="*80)
     print("📊 FINAL SUMMARY")
