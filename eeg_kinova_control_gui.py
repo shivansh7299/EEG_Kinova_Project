@@ -744,6 +744,10 @@ class EEGOnlyTab(QWidget):
         row2.addWidget(self.browse_model_btn)
         gb_layout.addLayout(row2)
 
+        self.enable_stabilization = QCheckBox("Enable 20s stabilization before prediction")
+        self.enable_stabilization.setChecked(False)
+        gb_layout.addWidget(self.enable_stabilization)
+
         gb.setLayout(gb_layout)
         layout.addWidget(gb)
 
@@ -800,17 +804,22 @@ class EEGOnlyTab(QWidget):
             return
         model_name = self.model_combo.currentText()
         model_path = self.model_path_input.text().strip()
+        stabilization_enabled = self.enable_stabilization.isChecked()
         self.log.append(f"Launching EEG-only Kinova control with {model_name}...")
         try:
             script = PROJECT_ROOT / "kinova_eeg_controller.py"
             cmd = launcher + [str(script), "--model", model_name]
             if model_path:
                 cmd += ["--model-path", model_path]
+            if stabilization_enabled:
+                cmd += ["--stabilization-seconds", "20"]
             subprocess.Popen(
                 cmd,
                 cwd=str(PROJECT_ROOT),
                 creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0
             )
+            if stabilization_enabled:
+                self.log.append("20s stabilization enabled. Robot will hold position before EEG prediction starts.")
             self.log.append("EEG-Kinova controller launched in new window.")
         except Exception as e:
             self.log.append(f"Error: {e}")
@@ -864,6 +873,10 @@ class EEGOpenCVTab(QWidget):
         self.browse_model_btn.clicked.connect(self.browse_model_file)
         row2.addWidget(self.browse_model_btn)
         gb_layout.addLayout(row2)
+
+        self.enable_stabilization = QCheckBox("Enable 20s stabilization before prediction")
+        self.enable_stabilization.setChecked(False)
+        gb_layout.addWidget(self.enable_stabilization)
 
         gb.setLayout(gb_layout)
         layout.addWidget(gb)
@@ -921,17 +934,22 @@ class EEGOpenCVTab(QWidget):
             return
         model_name = self.model_combo.currentText()
         model_path = self.model_path_input.text().strip()
+        stabilization_enabled = self.enable_stabilization.isChecked()
         self.log.append(f"Launching EEG + OpenCV Kinova control with {model_name}...")
         try:
             script = PROJECT_ROOT / "kinova_eeg_opencv_controller.py"
             cmd = launcher + [str(script), "--model", model_name]
             if model_path:
                 cmd += ["--model-path", model_path]
+            if stabilization_enabled:
+                cmd += ["--stabilization-seconds", "20"]
             subprocess.Popen(
                 cmd,
                 cwd=str(PROJECT_ROOT),
                 creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0
             )
+            if stabilization_enabled:
+                self.log.append("20s stabilization enabled. Robot will hold position before EEG prediction starts.")
             self.log.append("EEG+OpenCV Kinova controller launched in new window.")
         except Exception as e:
             self.log.append(f"Error: {e}")

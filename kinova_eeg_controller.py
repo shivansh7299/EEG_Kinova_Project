@@ -50,13 +50,15 @@ from hardware_config import (
     ANGLES_INIT,
     V_MAX,
     LIMIT_M,
+    INVERT_X,
     EEG_SAMPLES_PER_READ,
 )
 
 PREDICTION_INTERVAL_S = 1
 STATUS_INTERVAL_S = 2.0
 BOUNDARY_MARGIN_M = 0.03
-COMMAND_TIMEOUT_S = 1.5
+COMMAND_TIMEOUT_S = 0.9
+X_SIGN = -1.0 if INVERT_X else 1.0
 
 
 class Tee:
@@ -162,6 +164,23 @@ def get_x(base):
 
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
+
+
+def move_to_position_async(base, base_cyc, target_angles, timeout=15):
+    """Non-blocking position movement in background thread."""
+    def _move():
+        try:
+            ok, event = go_to_angles(base, base_cyc, target_angles, timeout=timeout)
+            if ok:
+                print(f"Position reached: {[f'{a:.2f}' for a in target_angles]}", flush=True)
+            else:
+                print(f"Position move failed (event={event}): {[f'{a:.2f}' for a in target_angles]}", flush=True)
+        except Exception as e:
+            print(f"Position movement error: {e}", flush=True)
+    
+    thread = threading.Thread(target=_move, daemon=True)
+    thread.start()
+    return thread
 
 
 # ====== EEG Stream ======
@@ -304,6 +323,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", choices=["EEGNet", "FBMSNet", "CTNet"], default="CTNet")
     parser.add_argument("--model-path", default="", help="Optional checkpoint path (.pth). Overrides default model lookup.")
+    parser.add_argument("--stabilization-seconds", type=int, default=0,
+                        help="Optional stabilization hold time before EEG prediction starts.")
     parser.add_argument("--no-robot", action="store_true", help="Run without robot (EEG + print only)")
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu", help="Inference device")
     args = parser.parse_args()
@@ -386,22 +407,47 @@ def main():
         X_MIN, X_MAX = -0.35, 0.0
         X_MIN_SAFE, X_MAX_SAFE = X_MIN + BOUNDARY_MARGIN_M, X_MAX - BOUNDARY_MARGIN_M
 
-    # Map class to velocity in X (up/down bar direction): 0=one way, 1=other way, 2=stop
-    def class_to_vx(cls):
+    # Define hardcoded positions for arm movement
+    # CSV labels: 1=Right, 2=Left -> Model labels: 0=Right, 1=Left (after preprocessing)
+    left_angles = list(ANGLES_INIT)  # Position for left prediction (class 1)
+    right_angles = [133.5, 57.56, 203.47, 279.17, 351.88, 56.01, 71.64]  # Position for right prediction (class 0)
+    
+    print(f"Left position (initial): {[f'{a:.2f}' for a in left_angles]}", flush=True)
+    print(f"Right position: {[f'{a:.2f}' for a in right_angles]}", flush=True)
+    
+    # Map class to target position angles
+    def class_to_target_angles(cls):
+        """Return target angles based on predicted class.
+        Class 0 = Right movement (CSV class 1) -> -36 offset
+        Class 1 = Left movement (CSV class 2) -> initial position
+        """
         if predictor.num_classes == 2:
-            return -V_MAX if cls == 0 else V_MAX
+            return right_angles if cls == 0 else left_angles
         else:
             if cls == 0:
-                return -V_MAX
+                return right_angles
             elif cls == 1:
-                return V_MAX
+                return left_angles
             else:
-                return 0.0
-
+                return None  # No movement for other classes
+        return None
+    
+    movement_thread = None
+    last_target_angles = None  # Track last target to avoid duplicate commands
     # Start EEG stream
     stream = EEGStream(predictor)
     stream.connect()
     stream.start()
+
+    stabilization_seconds = max(0, int(args.stabilization_seconds))
+    stabilization_start = time.time()
+    stabilization_end = stabilization_start + stabilization_seconds
+    last_stabilization_second = None
+    if stabilization_seconds > 0:
+        print(
+            f"Stabilization enabled: holding robot for {stabilization_seconds}s before EEG prediction starts.",
+            flush=True,
+        )
 
     print("Press Ctrl+C to stop.")
     try:
@@ -413,7 +459,27 @@ def main():
         watchdog_tripped = False
         while True:
             now = time.time()
-            if base and (now - last_motion_cmd_ts) > COMMAND_TIMEOUT_S:
+
+            if stabilization_seconds > 0 and now < stabilization_end:
+                remaining = int(max(0, stabilization_end - now + 0.999))
+                if remaining != last_stabilization_second:
+                    print(
+                        f"Stabilizing... {remaining}s remaining before first prediction.",
+                        flush=True,
+                    )
+                    last_stabilization_second = remaining
+                last_motion_cmd_ts = now
+                watchdog_tripped = False
+                time.sleep(0.05)
+                continue
+
+            if stabilization_seconds > 0 and last_stabilization_second is not None:
+                print("Stabilization complete. Starting EEG prediction and robot motion control.", flush=True)
+                stabilization_seconds = 0
+                last_stabilization_second = None
+
+            # Watchdog: only activate if no movement thread is running (position-based control)
+            if base and (now - last_motion_cmd_ts) > COMMAND_TIMEOUT_S and movement_thread is None:
                 if not watchdog_tripped:
                     print(
                         f"Motion watchdog: no fresh command for {COMMAND_TIMEOUT_S:.2f}s. Sending stop.",
@@ -428,7 +494,7 @@ def main():
                 age_txt = "n/a" if s["last_read_age_s"] is None else f"{s['last_read_age_s']:.2f}s"
                 print(
                     "EEG stream status | "
-                    f"buffer={s['buffer_len']}/250 | samples={s['total_samples']} | "
+                    f"buffer={s['buffer_len']}/{predictor.window_samples} | samples={s['total_samples']} | "
                     f"last_read_age={age_txt} | read_errors={s['read_errors']}",
                     flush=True,
                 )
@@ -460,7 +526,7 @@ def main():
                 last_status_time = now
 
             if now - last_pred_time >= PREDICTION_INTERVAL_S:
-                print(f"Inference tick | buffer={len(predictor.buffer)}/250", flush=True)
+                print(f"Inference tick | buffer={len(predictor.buffer)}/{predictor.window_samples}", flush=True)
                 t0 = time.time()
                 try:
                     pred, probs = predictor.predict()
@@ -470,50 +536,41 @@ def main():
                 dt_ms = (time.time() - t0) * 1000.0
                 if dt_ms > 500:
                     print(f"Prediction latency: {dt_ms:.1f} ms", flush=True)
+                
+                # Check if previous movement thread completed
+                if movement_thread is not None and not movement_thread.is_alive():
+                    movement_thread = None
+                
                 if pred is not None:
-                    vx = class_to_vx(pred)
-                    vx = clamp(vx, -V_MAX, V_MAX)
-                    blocked_by_limit = False
-                    # Clamp to workspace (X only, up/down direction)
-                    x_now = None
-                    if base:
-                        x_now = get_x(base)
-                        if (x_now <= X_MIN_SAFE and vx < 0) or (x_now >= X_MAX_SAFE and vx > 0):
-                            blocked_by_limit = True
-                            vx = 0.0
-                    send_vx(base, vx)
-                    last_motion_cmd_ts = now
-                    watchdog_tripped = False
-                    if blocked_by_limit:
-                        if x_now is not None:
+                    target_angles = class_to_target_angles(pred)
+                    if target_angles is not None:
+                        # Only send movement if:
+                        # 1. No movement currently in progress, AND
+                        # 2. Target has changed from last sent target
+                        target_changed = last_target_angles is None or target_angles != last_target_angles
+                        if movement_thread is None and target_changed:
+                            if base and HAS_KORTEX:
+                                movement_thread = move_to_position_async(base, base_cyc, target_angles, timeout=15)
+                                last_target_angles = target_angles
+                            last_motion_cmd_ts = now
+                            watchdog_tripped = False
                             print(
-                                f"Pred: {pred} | vx: {vx:.3f} (blocked at safe X limit) | "
-                                f"x={x_now:.3f} | probs: {[f'{p:.2f}' for p in probs]}",
+                                f"Pred: {pred} | Moving to angles: {[f'{a:.2f}' for a in target_angles]} | probs: {[f'{p:.2f}' for p in probs]}",
                                 flush=True,
                             )
-                        else:
+                        elif movement_thread is not None:
                             print(
-                                f"Pred: {pred} | vx: {vx:.3f} (blocked at safe X limit) | "
-                                f"probs: {[f'{p:.2f}' for p in probs]}",
+                                f"Pred: {pred} | Movement already in progress, waiting to complete | probs: {[f'{p:.2f}' for p in probs]}",
                                 flush=True,
                             )
                     else:
-                        if x_now is not None:
-                            print(
-                                f"Pred: {pred} | vx: {vx:.3f} | x={x_now:.3f} | probs: {[f'{p:.2f}' for p in probs]}",
-                                flush=True,
-                            )
-                        else:
-                            print(
-                                f"Pred: {pred} | vx: {vx:.3f} | probs: {[f'{p:.2f}' for p in probs]}",
-                                flush=True,
-                            )
+                        print(
+                            f"Pred: {pred} | No target position | probs: {[f'{p:.2f}' for p in probs]}",
+                            flush=True,
+                        )
                 else:
-                    send_vx(base, 0.0)
-                    last_motion_cmd_ts = now
-                    watchdog_tripped = False
                     print(
-                        f"Waiting for enough EEG data for prediction | buffer={len(predictor.buffer)}/250",
+                        f"Waiting for enough EEG data for prediction | buffer={len(predictor.buffer)}/{predictor.window_samples}",
                         flush=True,
                     )
                 last_pred_time = now
@@ -522,7 +579,8 @@ def main():
         print("\nStopping...")
     finally:
         stream.stop()
-        send_vx(base, 0.0)
+        if movement_thread is not None:
+            movement_thread.join(timeout=2)
         if robot:
             try:
                 robot[2].CloseSession()

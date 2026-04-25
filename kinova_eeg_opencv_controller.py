@@ -270,6 +270,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", choices=["EEGNet", "FBMSNet", "CTNet"], default="CTNet")
     parser.add_argument("--model-path", default="", help="Optional checkpoint path (.pth). Overrides default model lookup.")
+    parser.add_argument("--stabilization-seconds", type=int, default=0,
+                        help="Optional stabilization hold time before EEG prediction starts.")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -316,6 +318,17 @@ def main():
     stream.connect()
     stream.start()
 
+    stabilization_seconds = max(0, int(args.stabilization_seconds))
+    stabilization_start = time.time()
+    stabilization_end = stabilization_start + stabilization_seconds
+    last_stabilization_second = None
+    if stabilization_seconds > 0:
+        print(
+            f"Stabilization enabled: holding robot for {stabilization_seconds}s before EEG prediction starts.",
+            flush=True,
+        )
+        send_vx(base, 0.0)
+
     period = 1.0 / HZ
     kernel = np.ones((5, 5), np.uint8)
     kf = KalmanFilter(dim_x=4, dim_z=2)
@@ -356,6 +369,38 @@ def main():
             t_now = time.perf_counter()
             dt = max(1e-3, t_now - prev_t)
             prev_t = t_now
+
+            now_wall = time.time()
+            if stabilization_seconds > 0 and now_wall < stabilization_end:
+                remaining = int(max(0, stabilization_end - now_wall + 0.999))
+                if remaining != last_stabilization_second:
+                    print(
+                        f"Stabilizing... {remaining}s remaining before first prediction.",
+                        flush=True,
+                    )
+                    last_stabilization_second = remaining
+                send_vx(base, 0.0)
+                cv2.putText(
+                    warp,
+                    f"Stabilizing... {remaining}s",
+                    (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (255, 255, 255),
+                    2,
+                )
+                cv2.imshow("EEG+OpenCV Kinova", warp)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+                elapsed = time.perf_counter() - t_loop0
+                if period - elapsed > 0:
+                    time.sleep(period - elapsed)
+                continue
+
+            if stabilization_seconds > 0 and last_stabilization_second is not None:
+                print("Stabilization complete. Starting EEG prediction and robot motion control.", flush=True)
+                stabilization_seconds = 0
+                last_stabilization_second = None
 
             kf.F = np.array([[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]], dtype=float)
             q2 = Q_discrete_white_noise(dim=2, dt=dt, var=KF_ACCEL_STD ** 2)
