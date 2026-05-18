@@ -14,6 +14,7 @@ import threading
 import numpy as np
 import cv2
 from pathlib import Path
+from datetime import datetime
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -72,9 +73,47 @@ V_SLOW_MULT = 0.25   # When EEG mismatches: 25% speed
 PREDICTION_INTERVAL_S = 0.5  # EEG prediction every 0.5s
 DIR_THRESHOLD = 0.02  # vx below this = "stop" for direction comparison
 
+# Position targets (class 0 = RIGHT, class 1 = LEFT)
+LEFT_ANGLES = list(ANGLES_INIT)
+RIGHT_ANGLES = [133.5, 57.56, 203.47, 279.17, 351.88, 56.01, 71.64]
+
+# Movement timeouts (seconds) when moving to target positions
+TIMEOUT_FAST = 15 # If EEG matches OpenCV, use faster timeout
+TIMEOUT_SLOW = 20 # If no OpenCV direction (only EEG), use default timeout
+TIMEOUT_DEFAULT = 25 # If no OpenCV direction (only EEG), use default timeout
+CONF_THRESHOLD = 0.3  # minimum softmax confidence to trigger position move
+MOVEMENT_IN_PROGRESS = threading.Event()
+OPENCV_WEIGHT = 0.3  # 0..1 how much OpenCV influences motion (lower = less importance)
+
 
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
+
+
+def format_probs(probs):
+    if probs is None:
+        return "None"
+    return "[" + ", ".join(f"{float(p):.4f}" for p in probs) + "]"
+
+
+def log_event(message):
+    print(message, flush=True)
+
+
+class Tee:
+    """Write console output to terminal and log file at the same time."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+        return len(data)
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
 
 
 def biggest_contour_center(mask, min_area=200):
@@ -131,6 +170,17 @@ def go_to_angles(base, base_cyc, angles, timeout=25):
     ok = done.wait(timeout)
     base.Unsubscribe(handle)
     return ok
+
+
+def _move_and_log(base, base_cyc, angles, timeout=25):
+    try:
+        MOVEMENT_IN_PROGRESS.set()
+        log_event(f"[MOVE] start target={angles} timeout={timeout:.1f}s")
+        ok = go_to_angles(base, base_cyc, angles, timeout)
+        log_event(f"[MOVE] done target={angles} ok={ok}")
+        return ok
+    finally:
+        MOVEMENT_IN_PROGRESS.clear()
 
 
 def send_vx(base, vx):
@@ -268,15 +318,31 @@ class EEGStream:
 # ====== Main ======
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", choices=["EEGNet", "FBMSNet", "CTNet"], default="CTNet")
+    parser.add_argument("--model", choices=["EEGNet", "FBMSNet", "CTNet"], default="EEGNet")
     parser.add_argument("--model-path", default="", help="Optional checkpoint path (.pth). Overrides default model lookup.")
     parser.add_argument("--stabilization-seconds", type=int, default=0,
                         help="Optional stabilization hold time before EEG prediction starts.")
     args = parser.parse_args()
 
-    print("=" * 60)
-    print("Option 6: EEG + OpenCV (Match=Fast, Mismatch=Slow)")
-    print("=" * 60)
+    # --- Set up file logging (redirect stdout/stderr) ---
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    log_file = None
+    try:
+        log_dir = PROJECT_ROOT / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_path = log_dir / f"kinova_eeg_opencv_controller_{run_stamp}.log"
+        log_file = open(log_path, "a", encoding="utf-8")
+        sys.stdout = Tee(original_stdout, log_file)
+        sys.stderr = Tee(original_stderr, log_file)
+        log_event(f"Logging to: {log_path}")
+    except Exception as e:
+        print(f"Warning: could not open log file: {e}", file=original_stderr)
+
+    log_event("=" * 60)
+    log_event("Option 6: EEG + OpenCV (Match=Fast, Mismatch=Slow)")
+    log_event("=" * 60)
 
     # Load predictor
     try:
@@ -285,9 +351,9 @@ def main():
             model_path=(args.model_path.strip() or None),
         )
         num_classes = predictor.num_classes
-        print(f"Loaded {args.model} with {num_classes} classes")
+        log_event(f"Loaded {args.model} with {num_classes} classes")
     except FileNotFoundError as e:
-        print(f"Error: {e}")
+        log_event(f"Error: {e}")
         sys.exit(1)
 
     # Camera
@@ -299,19 +365,19 @@ def main():
         raise RuntimeError("No frame")
     H_persp = pick_screen_corners(frame)
     if H_persp is None:
-        print("Calibration canceled.")
+        log_event("Calibration canceled.")
         return
 
     # Robot (same as track_ball: initial pose, then X-only up/down movement)
     transport, router, session, base, base_cyc = connect_robot()
     if not go_to_angles(base, base_cyc, ANGLES_INIT):
-        print("Warning: timed out going to initial angles; continuing.")
+        log_event("Warning: timed out going to initial angles; continuing.")
     x_start = get_x(base)
     X_MIN = x_start - LIMIT_M
     X_MAX = x_start
     if X_MIN > X_MAX:
         X_MIN, X_MAX = X_MAX, X_MIN
-    print(f"Arm at initial pose. X range (up/down): [{X_MIN:.3f}, {X_MAX:.3f}]")
+    log_event(f"Arm at initial pose. X range (up/down): [{X_MIN:.3f}, {X_MAX:.3f}]")
 
     # EEG stream
     stream = EEGStream(predictor)
@@ -323,9 +389,8 @@ def main():
     stabilization_end = stabilization_start + stabilization_seconds
     last_stabilization_second = None
     if stabilization_seconds > 0:
-        print(
+        log_event(
             f"Stabilization enabled: holding robot for {stabilization_seconds}s before EEG prediction starts.",
-            flush=True,
         )
         send_vx(base, 0.0)
 
@@ -344,9 +409,10 @@ def main():
     vy_ball_s = 0.0
     vy_err_s = 0.0
     boost_count = 0
-    last_eeg_time = time.time()
+    last_eeg_time = time.perf_counter()  # Use same clock as t_now in main loop
+    movement_thread = None
 
-    print("Tracking... EEG match=fast, mismatch=slow. Press 'q' to quit.")
+    log_event("Tracking... EEG match=fast, mismatch=slow. Press 'q' to quit or Ctrl+C to force exit.")
     try:
         while True:
             t_loop0 = time.perf_counter()
@@ -374,9 +440,8 @@ def main():
             if stabilization_seconds > 0 and now_wall < stabilization_end:
                 remaining = int(max(0, stabilization_end - now_wall + 0.999))
                 if remaining != last_stabilization_second:
-                    print(
+                    log_event(
                         f"Stabilizing... {remaining}s remaining before first prediction.",
-                        flush=True,
                     )
                     last_stabilization_second = remaining
                 send_vx(base, 0.0)
@@ -398,7 +463,7 @@ def main():
                 continue
 
             if stabilization_seconds > 0 and last_stabilization_second is not None:
-                print("Stabilization complete. Starting EEG prediction and robot motion control.", flush=True)
+                log_event("Stabilization complete. Starting EEG prediction and robot motion control.")
                 stabilization_seconds = 0
                 last_stabilization_second = None
 
@@ -468,15 +533,77 @@ def main():
                 eeg_pred, _ = stream.get_prediction()
                 last_eeg_time = t_now
 
-            # Match/mismatch: scale vx_cmd when both EEG and OpenCV have a direction
+            # ===== NEW LOGIC: EEG determines direction, OpenCV modulates speed =====
             status = ""
-            if opencv_dir is not None and eeg_pred is not None:
-                match = (opencv_dir == eeg_pred)
-                mult = V_FAST_MULT if match else V_SLOW_MULT
-                vx_cmd = vx_cmd * mult
-                status = " MATCH (fast)" if match else " MISMATCH (slow)"
+            if eeg_pred is not None:
+                # EEG determines the direction
+                sign = -1.0 if eeg_pred == 0 else 1.0
+                
+                # If OpenCV is also available, use its speed and apply match/mismatch modulation
+                if opencv_dir is not None:
+                    # Both signals available: use OpenCV speed, modulate by EEG-OpenCV match
+                    opencv_speed = abs(vx_cmd)  # Speed magnitude from OpenCV
+                    match = (opencv_dir == eeg_pred)
+                    mult = V_FAST_MULT if match else V_SLOW_MULT
+                    # Blend multiplier
+                    effective_mult = (1.0 - OPENCV_WEIGHT) + OPENCV_WEIGHT * mult
+                    final_speed = opencv_speed * effective_mult
+                    status = " MATCH (fast)" if match else " MISMATCH (slow)"
+                else:
+                    # Only EEG available: use full speed
+                    final_speed = V_MAX
+                    status = " (EEG-only)"
+                
+                # Apply EEG direction with modulated speed
+                vx_cmd = CALIB_SIGN * sign * final_speed
+                
+                # Respect travel limits
+                try:
+                    x_now = get_x(base)
+                    if (x_now <= X_MIN and vx_cmd < 0) or (x_now >= X_MAX and vx_cmd > 0):
+                        vx_cmd = 0.0
+                except Exception:
+                    pass
+            elif opencv_dir is not None:
+                # Only OpenCV available (no EEG): keep OpenCV vx_cmd as-is
+                pass
+            else:
+                # Neither available
+                vx_cmd = 0.0
 
-            send_vx(base, vx_cmd)
+            # If a position move is in progress, suspend velocity commands to avoid conflicts
+            if MOVEMENT_IN_PROGRESS.is_set():
+                send_vx(base, 0.0)
+            else:
+                send_vx(base, vx_cmd)
+
+            # Position-based movement: launch non-blocking go_to_angles when EEG prediction present
+            if eeg_pred is not None:
+                # Only start a new move if previous move finished and confidence is high enough
+                probs = stream.latest_probs
+                conf_ok = probs is not None and max(probs) >= CONF_THRESHOLD
+                if (movement_thread is None or not movement_thread.is_alive()) and conf_ok:
+                    target_angles = RIGHT_ANGLES if eeg_pred == 0 else LEFT_ANGLES
+                    if opencv_dir is not None:
+                        match = (opencv_dir == eeg_pred)
+                        chosen = TIMEOUT_FAST if match else TIMEOUT_SLOW
+                        timeout = (1.0 - OPENCV_WEIGHT) * TIMEOUT_DEFAULT + OPENCV_WEIGHT * chosen
+                        move_speed = "fast" if match else "slow"
+                    else:
+                        timeout = TIMEOUT_DEFAULT
+                        move_speed = "default"
+                    opencv_label = opencv_dir if opencv_dir is not None else "None"
+                    conf_str = f"{max(probs):.4f}" if probs is not None else "None"
+                    log_event(
+                        f"[PRED] EEG={eeg_pred} probs={format_probs(probs)} conf={conf_str} OpenCVPred={opencv_label} "
+                        f"move={move_speed} timeout={timeout:.1f}s target={'RIGHT' if eeg_pred == 0 else 'LEFT'} "
+                    )
+                    movement_thread = threading.Thread(
+                        target=_move_and_log,
+                        args=(base, base_cyc, target_angles, timeout),
+                        daemon=True,
+                    )
+                    movement_thread.start()
 
             # HUD
             if bb_ball:
@@ -485,10 +612,17 @@ def main():
             if bb_bar:
                 rx, ry, rw, rh = bb_bar
                 cv2.rectangle(warp, (rx, ry), (rx + rw, ry + rh), (0, 0, 255), 2)
-            info = f"vx={vx_cmd:.3f} EEG={eeg_pred} OpenCV={opencv_dir}"
-            if opencv_dir is not None and eeg_pred is not None:
-                info += f" {status}"
-            cv2.putText(warp, info, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
+            
+            # Show latest known EEG prediction when no new one this loop
+            display_eeg = eeg_pred if eeg_pred is not None else stream.latest_pred
+            info = f"EEG={display_eeg} OpenCV={opencv_dir} vx={vx_cmd:.3f}"
+            if opencv_dir is not None and display_eeg is not None:
+                # determine status based on available values
+                match_flag = (opencv_dir == display_eeg) if (display_eeg is not None and opencv_dir is not None) else False
+                info += f" {status if match_flag else ''}" if status else ""
+            
+            cv2.putText(warp, info, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.putText(warp, f"Ball: {c_ball}, Bar: {c_bar}", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
 
             cv2.imshow("EEG+OpenCV Kinova", warp)
             if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -505,6 +639,19 @@ def main():
         transport.disconnect()
         cap.release()
         cv2.destroyAllWindows()
+        # restore stdio and close logfile if set
+        try:
+            if 'original_stdout' in locals():
+                sys.stdout = original_stdout
+            if 'original_stderr' in locals():
+                sys.stderr = original_stderr
+        except Exception:
+            pass
+        if log_file is not None:
+            try:
+                log_file.close()
+            except Exception:
+                pass
         print("Done.")
 
 

@@ -54,11 +54,11 @@ from hardware_config import (
     EEG_SAMPLES_PER_READ,
 )
 
-PREDICTION_INTERVAL_S = 1
-STATUS_INTERVAL_S = 2.0
-BOUNDARY_MARGIN_M = 0.03
-COMMAND_TIMEOUT_S = 0.9
-X_SIGN = -1.0 if INVERT_X else 1.0
+PREDICTION_INTERVAL_S = 0.5  # Time between EEG predictions; adjust as needed for responsiveness vs. stability
+STATUS_INTERVAL_S = 2.0 # Time between status prints (EEG stream and robot state)
+BOUNDARY_MARGIN_M = 0.03   # Safety margin from robot travel limits (can be set to 0 for exact limits, or increased if needed for safety)
+COMMAND_TIMEOUT_S = 0.9 # Time without new movement command before sending stop (only applies to position-based control with movement threads, not velocity commands)
+X_SIGN = -1.0 if INVERT_X else 1.0 # Sign for X direction (up/down bar direction). Set to -1 to invert, or 1 for normal.
 
 
 class Tee:
@@ -329,6 +329,8 @@ def main():
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu", help="Inference device")
     args = parser.parse_args()
 
+    stabilization_seconds = max(0, int(args.stabilization_seconds))
+
     print(f"Logging to: {log_path}", flush=True)
 
     print("=" * 60)
@@ -439,7 +441,6 @@ def main():
     stream.connect()
     stream.start()
 
-    stabilization_seconds = max(0, int(args.stabilization_seconds))
     stabilization_start = time.time()
     stabilization_end = stabilization_start + stabilization_seconds
     last_stabilization_second = None
@@ -477,6 +478,7 @@ def main():
                 print("Stabilization complete. Starting EEG prediction and robot motion control.", flush=True)
                 stabilization_seconds = 0
                 last_stabilization_second = None
+                stream.log_timestamps = True
 
             # Watchdog: only activate if no movement thread is running (position-based control)
             if base and (now - last_motion_cmd_ts) > COMMAND_TIMEOUT_S and movement_thread is None:
@@ -540,8 +542,16 @@ def main():
                 # Check if previous movement thread completed
                 if movement_thread is not None and not movement_thread.is_alive():
                     movement_thread = None
+                    last_motion_cmd_ts = now
+                    watchdog_tripped = False
                 
                 if pred is not None:
+                    if log_file is not None:
+                        log_file.write(
+                            f"EEG prediction timestamp: {datetime.now().isoformat(timespec='milliseconds')} | "
+                            f"predicted_class={pred} | probs={[f'{p:.2f}' for p in probs]}\n"
+                        )
+                        log_file.flush()
                     target_angles = class_to_target_angles(pred)
                     if target_angles is not None:
                         # Only send movement if:

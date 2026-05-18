@@ -13,7 +13,7 @@ USERNAME = "admin"
 PASSWORD = "admin"
 # ANGLES_INIT = [101.9, 39.18, 177.13, 246.77, 285.5, 86.98, 120.09]
 ANGLES_INIT = [97.39, 41.8, 194.35, 232.9, 317.41, 86.03, 86.24]
-LIMIT_M = 0.35
+LIMIT_M = 0.30
 V_MAX = 0.2
 AX_MAX = 0.80
 
@@ -47,6 +47,9 @@ RED2_HI = (180, 255, 255)
 # Kalman tuning (pixels)
 KF_MEAS_STD_PX = 4.0
 KF_ACCEL_STD = 600.0
+
+# Safety boundary (shared across controllers)
+BOUNDARY_MARGIN_M = 0.0  # Default to exact travel limits; override if needed
 
 # ====== EEG HEADSET (mirrors dataCollection.py UnicornRecorder) ======
 EEG_FS = 250

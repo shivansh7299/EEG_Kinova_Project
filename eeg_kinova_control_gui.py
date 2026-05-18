@@ -62,6 +62,21 @@ def _resolve_conda_launcher():
     return None, err
 
 
+def _launch_persistent_console(cmd):
+    """Launch a command in a console that stays open after the process exits on Windows."""
+    if sys.platform == 'win32':
+        console_cmd = ["cmd", "/k", *cmd]
+        creationflags = subprocess.CREATE_NEW_CONSOLE
+    else:
+        console_cmd = cmd
+        creationflags = 0
+    return subprocess.Popen(
+        console_cmd,
+        cwd=str(PROJECT_ROOT),
+        creationflags=creationflags,
+    )
+
+
 # ============================================================================
 # Background Worker Thread
 # ============================================================================
@@ -813,11 +828,7 @@ class EEGOnlyTab(QWidget):
                 cmd += ["--model-path", model_path]
             if stabilization_enabled:
                 cmd += ["--stabilization-seconds", "20"]
-            subprocess.Popen(
-                cmd,
-                cwd=str(PROJECT_ROOT),
-                creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0
-            )
+            _launch_persistent_console(cmd)
             if stabilization_enabled:
                 self.log.append("20s stabilization enabled. Robot will hold position before EEG prediction starts.")
             self.log.append("EEG-Kinova controller launched in new window.")
@@ -936,23 +947,25 @@ class EEGOpenCVTab(QWidget):
         model_path = self.model_path_input.text().strip()
         stabilization_enabled = self.enable_stabilization.isChecked()
         self.log.append(f"Launching EEG + OpenCV Kinova control with {model_name}...")
+        self.log.append(f"[DEBUG] Launcher: {launcher}")
         try:
             script = PROJECT_ROOT / "kinova_eeg_opencv_controller.py"
+            self.log.append(f"[DEBUG] Script path: {script}")
+            self.log.append(f"[DEBUG] Script exists: {script.exists()}")
             cmd = launcher + [str(script), "--model", model_name]
             if model_path:
                 cmd += ["--model-path", model_path]
             if stabilization_enabled:
                 cmd += ["--stabilization-seconds", "20"]
-            subprocess.Popen(
-                cmd,
-                cwd=str(PROJECT_ROOT),
-                creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0
-            )
+            self.log.append(f"[DEBUG] Full command: {' '.join(cmd)}")
+            print(f"\n[GUI DEBUG] Running command: {' '.join(cmd)}\n", file=sys.stderr)
+            _launch_persistent_console(cmd)
             if stabilization_enabled:
                 self.log.append("20s stabilization enabled. Robot will hold position before EEG prediction starts.")
             self.log.append("EEG+OpenCV Kinova controller launched in new window.")
         except Exception as e:
             self.log.append(f"Error: {e}")
+            print(f"\n[GUI ERROR] {e}\n", file=sys.stderr)
             QMessageBox.critical(self, "Error", str(e))
 
 

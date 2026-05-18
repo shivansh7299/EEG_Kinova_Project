@@ -57,13 +57,17 @@ class RealTimeEEGPredictor:
 
     def __init__(self, model_name="CTNet", model_path=None, device=None):
         self.model_name = model_name
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if device is None:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        elif isinstance(device, str):
+            self.device = torch.device(device)
+        else:
+            self.device = device
         self.model = None
         self.num_classes = 2
         self.window_samples = WINDOW_SAMPLES
         self.buffer = []
         self.model_path = model_path or self._find_model_path()
-
         self._load_model()
 
     def _find_model_path(self):
@@ -118,21 +122,22 @@ class RealTimeEEGPredictor:
     def _load_model(self):
         if self.model_name == "EEGNet":
             from EEGNet_new_model import EEGNet
-            ckpt = torch.load(self.model_path, map_location=self.device)
+            ckpt = torch.load(self.model_path, map_location='cpu')
             if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
                 state = ckpt["model_state_dict"]
                 self.num_classes = ckpt.get("num_classes", 2)
             else:
                 state = ckpt
                 self.num_classes = 2
-
             self.window_samples = self._infer_eegnet_window_samples(state)
             self.model = EEGNet(num_classes=self.num_classes, num_channels=N_CHANNELS,
-                               num_samples=self.window_samples).to(self.device)
+                               num_samples=self.window_samples)
+            self.device = torch.device('cpu')
+            self.model = self.model.to(self.device)
             self.model.load_state_dict(state, strict=False)
         elif self.model_name == "CTNet":
             from ctnet_model import CTNetLite
-            ckpt = torch.load(self.model_path, map_location=self.device)
+            ckpt = torch.load(self.model_path, map_location='cpu')
             if isinstance(ckpt, dict):
                 state = ckpt.get("model_state_dict", ckpt)
                 self.num_classes = ckpt.get("num_classes")
@@ -146,17 +151,18 @@ class RealTimeEEGPredictor:
                         break
                 self.num_classes = self.num_classes or 2
             self.window_samples = WINDOW_SAMPLES
+            self.device = torch.device('cpu')
             self.model = CTNetLite(n_channels=N_CHANNELS, n_timepoints=WINDOW_SAMPLES,
                                    n_classes=self.num_classes).to(self.device)
             self.model.load_state_dict(state, strict=False)
         elif self.model_name == "FBMSNet":
             sys.path.insert(0, str(PROJECT_ROOT / "FBMSNet"))
             from codes.centralRepo.networks import FBMSNet
-            ckpt = torch.load(self.model_path, map_location=self.device)
+            ckpt = torch.load(self.model_path, map_location='cpu')
             state = ckpt.get("model_state_dict", ckpt)
             self.num_classes = ckpt.get("num_classes", 2)
             self.window_samples = WINDOW_SAMPLES
-            # FBMSNet expects (batch, 9, 8, 248) - multiband
+            self.device = torch.device('cpu')
             self.model = FBMSNet(nChan=8, nTime=248, nClass=self.num_classes,
                                  temporalLayer='LogVarLayer', num_Feat=36,
                                  dilatability=8, dropoutP=0.6).to(self.device)
