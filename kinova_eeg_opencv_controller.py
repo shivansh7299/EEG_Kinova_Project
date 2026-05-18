@@ -533,43 +533,29 @@ def main():
                 eeg_pred, _ = stream.get_prediction()
                 last_eeg_time = t_now
 
-            # ===== NEW LOGIC: EEG determines direction, OpenCV modulates speed =====
-            status = ""
-            if eeg_pred is not None:
-                # EEG determines the direction
+            # If OpenCV has no direction but EEG predicts, drive using EEG alone
+            if opencv_dir is None and eeg_pred is not None:
+                # Map EEG class to vx sign consistent with vx_to_direction: class 0 -> negative vx, class 1 -> positive vx
                 sign = -1.0 if eeg_pred == 0 else 1.0
-                
-                # If OpenCV is also available, use its speed and apply match/mismatch modulation
-                if opencv_dir is not None:
-                    # Both signals available: use OpenCV speed, modulate by EEG-OpenCV match
-                    opencv_speed = abs(vx_cmd)  # Speed magnitude from OpenCV
-                    match = (opencv_dir == eeg_pred)
-                    mult = V_FAST_MULT if match else V_SLOW_MULT
-                    # Blend multiplier
-                    effective_mult = (1.0 - OPENCV_WEIGHT) + OPENCV_WEIGHT * mult
-                    final_speed = opencv_speed * effective_mult
-                    status = " MATCH (fast)" if match else " MISMATCH (slow)"
-                else:
-                    # Only EEG available: use full speed
-                    final_speed = V_MAX
-                    status = " (EEG-only)"
-                
-                # Apply EEG direction with modulated speed
-                vx_cmd = CALIB_SIGN * sign * final_speed
-                
+                vx_cmd = CALIB_SIGN * sign * V_MAX
                 # Respect travel limits
                 try:
                     x_now = get_x(base)
                     if (x_now <= X_MIN and vx_cmd < 0) or (x_now >= X_MAX and vx_cmd > 0):
                         vx_cmd = 0.0
                 except Exception:
+                    # If reading pose fails, fall back to sending vx as-is
                     pass
-            elif opencv_dir is not None:
-                # Only OpenCV available (no EEG): keep OpenCV vx_cmd as-is
-                pass
-            else:
-                # Neither available
-                vx_cmd = 0.0
+
+            # Match/mismatch: scale vx_cmd when both EEG and OpenCV have a direction
+            status = ""
+            if opencv_dir is not None and eeg_pred is not None:
+                match = (opencv_dir == eeg_pred)
+                mult = V_FAST_MULT if match else V_SLOW_MULT
+                # Blend OpenCV multiplier with neutral (1.0) according to OPENCV_WEIGHT
+                effective_mult = (1.0 - OPENCV_WEIGHT) + OPENCV_WEIGHT * mult
+                vx_cmd = vx_cmd * effective_mult
+                status = " MATCH (fast)" if match else " MISMATCH (slow)"
 
             # If a position move is in progress, suspend velocity commands to avoid conflicts
             if MOVEMENT_IN_PROGRESS.is_set():
@@ -593,10 +579,9 @@ def main():
                         timeout = TIMEOUT_DEFAULT
                         move_speed = "default"
                     opencv_label = opencv_dir if opencv_dir is not None else "None"
-                    conf_str = f"{max(probs):.4f}" if probs is not None else "None"
                     log_event(
-                        f"[PRED] EEG={eeg_pred} probs={format_probs(probs)} conf={conf_str} OpenCVPred={opencv_label} "
-                        f"move={move_speed} timeout={timeout:.1f}s target={'RIGHT' if eeg_pred == 0 else 'LEFT'} "
+                        f"[PRED] EEG={eeg_pred} probs={format_probs(probs)} OpenCVPred={opencv_label} "
+                        f"move={move_speed} timeout={timeout:.1f}s target={'RIGHT' if eeg_pred == 0 else 'LEFT'}"
                     )
                     movement_thread = threading.Thread(
                         target=_move_and_log,
