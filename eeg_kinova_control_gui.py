@@ -123,33 +123,47 @@ class WorkerThread(QThread):
 # ============================================================================
 # Notebook Execution Worker (for preprocessing)
 # ============================================================================
+def _patch_notebook_line(line: str, subject_no: int, n_class: int) -> str:
+    """Inject GUI-selected subject/class into preprocessing notebooks."""
+    data_pattern = f"data/{n_class}_class"
+    line = re.sub(r"SUBJECT_NO\s*=\s*\d+", f"SUBJECT_NO = {subject_no}", line)
+    line = re.sub(r"N_CLASSES\s*=\s*\d+", f"N_CLASSES = {n_class}", line)
+    line = re.sub(
+        r"data/Subject\s+\d+/\d+_class",
+        data_pattern,
+        line,
+        flags=re.IGNORECASE,
+    )
+    if "data/2_class" in line or "data/3_class" in line:
+        line = line.replace("data/2_class", data_pattern).replace("data/3_class", data_pattern)
+    return line
+
+
 class NotebookWorker(QThread):
     output = pyqtSignal(str)
     finished_signal = pyqtSignal(int, str)
 
-    def __init__(self, notebook_path, n_class):
+    def __init__(self, notebook_path, subject_no, n_class):
         super().__init__()
         self.notebook_path = Path(notebook_path)
+        self.subject_no = subject_no
         self.n_class = n_class
 
     def run(self):
         import json
         try:
-            # Patch notebook to use correct data path (data/2_class or data/3_class)
             with open(self.notebook_path, "r", encoding="utf-8") as f:
                 nb = json.load(f)
-            data_pattern = f"data/{self.n_class}_class"
             for cell in nb.get("cells", []):
                 if cell.get("cell_type") == "code":
                     src = cell.get("source", [])
                     if isinstance(src, list):
-                        new_src = []
-                        for line in src:
-                            # Replace data/2_class or data/3_class with our path
-                            if "data/2_class" in line or "data/3_class" in line:
-                                line = line.replace("data/2_class", data_pattern).replace("data/3_class", data_pattern)
-                            new_src.append(line)
-                        cell["source"] = new_src
+                        cell["source"] = [
+                            _patch_notebook_line(line, self.subject_no, self.n_class)
+                            for line in src
+                        ]
+                    elif isinstance(src, str):
+                        cell["source"] = _patch_notebook_line(src, self.subject_no, self.n_class)
 
             temp_nb = self.notebook_path.parent / f"_temp_{self.notebook_path.name}"
             with open(temp_nb, "w", encoding="utf-8") as f:
@@ -393,9 +407,14 @@ class PreprocessingTab(QWidget):
             )
             return
 
-        # Copy CSVs from subject folder to data/N_class/ (notebooks expect this path)
+        # Stage selected subject CSVs to data/N_class/ (notebooks read this path)
         class_dir = PROJECT_ROOT / "data" / f"{n_class}_class"
         class_dir.mkdir(parents=True, exist_ok=True)
+        for old_csv in class_dir.glob("EEG_*.csv"):
+            try:
+                old_csv.unlink()
+            except Exception as e:
+                self.log.append(f"Clear warning: {e}")
         for f in csv_files:
             try:
                 shutil.copy2(f, class_dir / f.name)
@@ -415,10 +434,11 @@ class PreprocessingTab(QWidget):
         self.run_btn.setEnabled(False)
         self.log.append(f"\n[{datetime.now().strftime('%H:%M:%S')}] Starting preprocessing for Subject {subj}, {n_class}-class data...")
         self.log.append(f"Source: {subject_class_dir}  ({len(csv_files)} CSV files)")
+        self.log.append(f"Notebook input: {class_dir}")
 
-        self._run_next_notebook(notebooks, 0, n_class)
+        self._run_next_notebook(notebooks, 0, subj, n_class)
 
-    def _run_next_notebook(self, notebooks, idx, n_class):
+    def _run_next_notebook(self, notebooks, idx, subject_no, n_class):
         if idx >= len(notebooks):
             self._stage_subject_npy_outputs()
             self.log.append("\nAll preprocessing complete!")
@@ -427,22 +447,22 @@ class PreprocessingTab(QWidget):
 
         nb = notebooks[idx]
         if not nb.exists():
-            self._run_next_notebook(notebooks, idx + 1, n_class)
+            self._run_next_notebook(notebooks, idx + 1, subject_no, n_class)
             return
 
-        worker = NotebookWorker(str(nb), n_class)
+        worker = NotebookWorker(str(nb), subject_no, n_class)
         worker.output.connect(lambda t: self.log.append(t))
         worker.finished_signal.connect(
-            lambda code, msg: self._on_notebook_done(code, msg, notebooks, idx, n_class)
+            lambda code, msg: self._on_notebook_done(code, msg, notebooks, idx, subject_no, n_class)
         )
         self.workers.append(worker)
         worker.start()
 
-    def _on_notebook_done(self, code, msg, notebooks, idx, n_class):
+    def _on_notebook_done(self, code, msg, notebooks, idx, subject_no, n_class):
         self.log.append(f"Exit code {code}: {msg}")
         if code != 0:
             self.log.append("Preprocessing may have failed. Check log above.")
-        self._run_next_notebook(notebooks, idx + 1, n_class)
+        self._run_next_notebook(notebooks, idx + 1, subject_no, n_class)
 
     def _stage_subject_npy_outputs(self):
         """Copy generated preprocessing .npy files to selected subject folder for training tab use."""
