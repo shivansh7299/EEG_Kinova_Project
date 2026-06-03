@@ -69,21 +69,27 @@ RED2_LO = np.array(_RED2_LO)
 RED2_HI = np.array(_RED2_HI)
 
 V_FAST_MULT = 1.0    # When EEG matches OpenCV: full speed
-V_SLOW_MULT = 0.25   # When EEG mismatches: 25% speed
+V_SLOW_MULT = 0.5  # When EEG mismatches: 50% speed
 PREDICTION_INTERVAL_S = 0.5  # EEG prediction every 0.5s
 DIR_THRESHOLD = 0.02  # vx below this = "stop" for direction comparison
+BASE_VX = 0.177  # fixed hybrid speed magnitude before match/mismatch scaling (sane default)
+MOVE_COOLDOWN_S = 1.0 # minimum seconds between successive position moves
+MIN_MOVE_DELTA_M = 0.01  # minimum Cartesian X (m) change considered a successful position move
+REPEAT_MOVE_MAX = 1  # number of times to retry a position move if measured change is below threshold
+VELOCITY_HOLD_S = 0.8  # seconds to hold last EEG prediction for velocity commands
 
 # Position targets (class 0 = RIGHT, class 1 = LEFT)
 LEFT_ANGLES = list(ANGLES_INIT)
 RIGHT_ANGLES = [133.5, 57.56, 203.47, 279.17, 351.88, 56.01, 71.64]
 
 # Movement timeouts (seconds) when moving to target positions
-TIMEOUT_FAST = 15 # If EEG matches OpenCV, use faster timeout
+TIMEOUT_FAST = 30 # If EEG matches OpenCV, use faster timeout
 TIMEOUT_SLOW = 20 # If no OpenCV direction (only EEG), use default timeout
 TIMEOUT_DEFAULT = 25 # If no OpenCV direction (only EEG), use default timeout
-CONF_THRESHOLD = 0.3  # minimum softmax confidence to trigger position move
+TIMEOUT_MIN = 12  # min timeout (fastest move)
+TIMEOUT_MAX = 40  # max timeout (slowest move)
+CONF_THRESHOLD = 0.5  # minimum softmax confidence to trigger position move
 MOVEMENT_IN_PROGRESS = threading.Event()
-OPENCV_WEIGHT = 0.3  # 0..1 how much OpenCV influences motion (lower = less importance)
 
 
 def clamp(v, lo, hi):
@@ -175,16 +181,40 @@ def go_to_angles(base, base_cyc, angles, timeout=25):
 def _move_and_log(base, base_cyc, angles, timeout=25):
     try:
         MOVEMENT_IN_PROGRESS.set()
-        log_event(f"[MOVE] start target={angles} timeout={timeout:.1f}s")
-        ok = go_to_angles(base, base_cyc, angles, timeout)
-        log_event(f"[MOVE] done target={angles} ok={ok}")
-        return ok
+        attempt = 0
+        while attempt <= REPEAT_MOVE_MAX:
+            attempt += 1
+            x_before = None
+            x_after = None
+            try:
+                x_before = get_x(base)
+            except Exception:
+                pass
+            log_event(f"[MOVE] start target={angles} timeout={timeout:.1f}s attempt={attempt}")
+            ok = go_to_angles(base, base_cyc, angles, timeout)
+            try:
+                x_after = get_x(base)
+            except Exception:
+                pass
+            dx = None
+            if x_before is not None and x_after is not None:
+                dx = x_after - x_before
+            log_event(f"[MOVE] done target={angles} ok={ok} dx={dx}")
+            # If move reported ok but measured Cartesian change is too small, retry once
+            if ok and dx is not None and abs(dx) < MIN_MOVE_DELTA_M and attempt <= REPEAT_MOVE_MAX:
+                log_event(f"[MOVE] measured dx={dx:.4f} < {MIN_MOVE_DELTA_M:.4f}, retrying move")
+                continue
+            return ok
     finally:
         MOVEMENT_IN_PROGRESS.clear()
 
 
 def send_vx(base, vx):
     """Send velocity in X only (up/down bar direction, same as track_ball)."""
+    try:
+        log_event(f"[CMD] send_vx vx={vx:.4f}")
+    except Exception:
+        pass
     cmd = Base_pb2.TwistCommand()
     cmd.reference_frame = Base_pb2.CARTESIAN_REFERENCE_FRAME_BASE
     cmd.duration = 0
@@ -411,6 +441,11 @@ def main():
     boost_count = 0
     last_eeg_time = time.perf_counter()  # Use same clock as t_now in main loop
     movement_thread = None
+    last_move_time = 0.0
+    last_move_class = None
+    last_target_angles = None
+    last_active_pred = None
+    last_pred_time = 0.0
 
     log_event("Tracking... EEG match=fast, mismatch=slow. Press 'q' to quit or Ctrl+C to force exit.")
     try:
@@ -527,68 +562,67 @@ def main():
                 prev_ball_y = None
                 prev_bar_y = None
 
-            # EEG prediction
+            # EEG prediction (periodic) — hold last prediction between ticks for continuous velocity
             eeg_pred = None
             if t_now - last_eeg_time >= PREDICTION_INTERVAL_S:
                 eeg_pred, _ = stream.get_prediction()
                 last_eeg_time = t_now
+                if eeg_pred is not None:
+                    last_active_pred = eeg_pred
+                    last_pred_time = t_now
 
-            # If OpenCV has no direction but EEG predicts, drive using EEG alone
-            if opencv_dir is None and eeg_pred is not None:
-                # Map EEG class to vx sign consistent with vx_to_direction: class 0 -> negative vx, class 1 -> positive vx
-                sign = -1.0 if eeg_pred == 0 else 1.0
-                vx_cmd = CALIB_SIGN * sign * V_MAX
-                # Respect travel limits
+            # Decide which EEG prediction to use for velocity: fresh or held
+            effective_pred = None
+            if eeg_pred is not None:
+                effective_pred = eeg_pred
+            elif last_active_pred is not None and (t_now - last_pred_time) <= VELOCITY_HOLD_S:
+                effective_pred = last_active_pred
+
+            # EEG always determines direction when available. OpenCV only modulates speed.
+            status = ""
+            opencv_vx = vx_cmd if opencv_dir is not None else None
+            opencv_speed = None
+            if effective_pred is not None:
+                # EEG always wins on direction
+                sign = -1.0 if effective_pred == 0 else 1.0
+
+                if opencv_dir is not None and opencv_vx is not None and abs(opencv_vx) > 1e-4:
+                    measured = abs(opencv_vx)
+                    opencv_speed = clamp(measured, 0.01, V_MAX)
+                    match = (opencv_dir == effective_pred)
+                    speed = opencv_speed * (V_FAST_MULT if match else V_SLOW_MULT)
+                    status = " MATCH (fast)" if match else " MISMATCH (slow)"
+                else:
+                    speed = BASE_VX
+                    status = " (EEG-only)" if opencv_dir is None else " (EEG override)"
+
+                vx_cmd = CALIB_SIGN * sign * speed
                 try:
                     x_now = get_x(base)
                     if (x_now <= X_MIN and vx_cmd < 0) or (x_now >= X_MAX and vx_cmd > 0):
                         vx_cmd = 0.0
                 except Exception:
-                    # If reading pose fails, fall back to sending vx as-is
                     pass
-
-            # Match/mismatch: scale vx_cmd when both EEG and OpenCV have a direction
-            status = ""
-            if opencv_dir is not None and eeg_pred is not None:
-                match = (opencv_dir == eeg_pred)
-                mult = V_FAST_MULT if match else V_SLOW_MULT
-                # Blend OpenCV multiplier with neutral (1.0) according to OPENCV_WEIGHT
-                effective_mult = (1.0 - OPENCV_WEIGHT) + OPENCV_WEIGHT * mult
-                vx_cmd = vx_cmd * effective_mult
-                status = " MATCH (fast)" if match else " MISMATCH (slow)"
-
-            # If a position move is in progress, suspend velocity commands to avoid conflicts
-            if MOVEMENT_IN_PROGRESS.is_set():
-                send_vx(base, 0.0)
             else:
-                send_vx(base, vx_cmd)
+                # No EEG (fresh or held): stop robot regardless of OpenCV
+                vx_cmd = 0.0
 
-            # Position-based movement: launch non-blocking go_to_angles when EEG prediction present
+            # Always send velocity commands (velocity-driven paradigm)
+            send_vx(base, vx_cmd)
+
+            # Position moves disabled in velocity-driven mode. Log EEG prediction and confidence for visibility.
             if eeg_pred is not None:
-                # Only start a new move if previous move finished and confidence is high enough
                 probs = stream.latest_probs
                 conf_ok = probs is not None and max(probs) >= CONF_THRESHOLD
-                if (movement_thread is None or not movement_thread.is_alive()) and conf_ok:
-                    target_angles = RIGHT_ANGLES if eeg_pred == 0 else LEFT_ANGLES
-                    if opencv_dir is not None:
-                        match = (opencv_dir == eeg_pred)
-                        chosen = TIMEOUT_FAST if match else TIMEOUT_SLOW
-                        timeout = (1.0 - OPENCV_WEIGHT) * TIMEOUT_DEFAULT + OPENCV_WEIGHT * chosen
-                        move_speed = "fast" if match else "slow"
-                    else:
-                        timeout = TIMEOUT_DEFAULT
-                        move_speed = "default"
-                    opencv_label = opencv_dir if opencv_dir is not None else "None"
-                    log_event(
-                        f"[PRED] EEG={eeg_pred} probs={format_probs(probs)} OpenCVPred={opencv_label} "
-                        f"move={move_speed} timeout={timeout:.1f}s target={'RIGHT' if eeg_pred == 0 else 'LEFT'}"
-                    )
-                    movement_thread = threading.Thread(
-                        target=_move_and_log,
-                        args=(base, base_cyc, target_angles, timeout),
-                        daemon=True,
-                    )
-                    movement_thread.start()
+                opencv_label = opencv_dir if opencv_dir is not None else "None"
+                conf_str = f"{max(probs):.4f}" if probs is not None else "None"
+                base_speed_str = f"{BASE_VX:.4f}"
+                opencv_vx_str = f"{opencv_vx:.4f}" if opencv_vx is not None else "None"
+                opencv_speed_str = f"{opencv_speed:.4f}" if opencv_speed is not None else "None"
+                log_event(
+                    f"[PRED] EEG={eeg_pred} probs={format_probs(probs)} conf={conf_str} OpenCVPred={opencv_label} "
+                    f"base_speed={base_speed_str} opencv_vx={opencv_vx_str} opencv_speed={opencv_speed_str} "
+                    f"(position moves disabled; using velocity)")
 
             # HUD
             if bb_ball:

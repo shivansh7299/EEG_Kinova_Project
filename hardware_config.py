@@ -13,8 +13,8 @@ USERNAME = "admin"
 PASSWORD = "admin"
 # ANGLES_INIT = [101.9, 39.18, 177.13, 246.77, 285.5, 86.98, 120.09]
 ANGLES_INIT = [97.39, 41.8, 194.35, 232.9, 317.41, 86.03, 86.24]
-LIMIT_M = 0.30
-V_MAX = 0.2
+LIMIT_M = 0.35
+V_MAX = 0.8
 AX_MAX = 0.80
 
 # Camera (for Option 6 / track_ball)

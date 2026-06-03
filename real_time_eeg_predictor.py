@@ -18,7 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 from hardware_config import EEG_FS
 FS = EEG_FS
 N_CHANNELS = 8
-WINDOW_SAMPLES = 500  # 2 second #250 for 1 sec
+WINDOW_SAMPLES = 250  # 2 second #250 for 1 sec
 LOWCUT = 4
 HIGHCUT = 40
 FILTER_ORDER = 5

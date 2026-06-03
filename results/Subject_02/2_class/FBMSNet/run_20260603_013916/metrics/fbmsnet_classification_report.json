@@ -1,0 +1,27 @@
+{
+  "Class 0": {
+    "precision": 0.6956521739130435,
+    "recall": 1.0,
+    "f1-score": 0.8205128205128205,
+    "support": 16
+  },
+  "Class 1": {
+    "precision": 1.0,
+    "recall": 0.5625,
+    "f1-score": 0.72,
+    "support": 16
+  },
+  "accuracy": 0.78125,
+  "macro avg": {
+    "precision": 0.8478260869565217,
+    "recall": 0.78125,
+    "f1-score": 0.7702564102564102,
+    "support": 32
+  },
+  "weighted avg": {
+    "precision": 0.8478260869565217,
+    "recall": 0.78125,
+    "f1-score": 0.7702564102564102,
+    "support": 32
+  }
+}

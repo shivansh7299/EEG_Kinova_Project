@@ -183,6 +183,36 @@ class NotebookWorker(QThread):
                     self.output.emit(line.rstrip())
             proc.wait()
 
+            # Extract and emit notebook cell outputs
+            if proc.returncode == 0 and temp_nb.exists():
+                try:
+                    with open(temp_nb, "r", encoding="utf-8") as f:
+                        executed_nb = json.load(f)
+                    self.output.emit("\n" + "=" * 70)
+                    self.output.emit("NOTEBOOK OUTPUTS:")
+                    self.output.emit("=" * 70)
+                    for cell_idx, cell in enumerate(executed_nb.get("cells", [])):
+                        if cell.get("cell_type") == "code" and "outputs" in cell:
+                            outputs = cell.get("outputs", [])
+                            for output in outputs:
+                                if output.get("output_type") == "stream":
+                                    text = output.get("text", "")
+                                    if isinstance(text, list):
+                                        text = "".join(text)
+                                    if text.strip():
+                                        for line in text.strip().split("\n"):
+                                            self.output.emit(line)
+                                elif output.get("output_type") == "execute_result":
+                                    data = output.get("data", {})
+                                    if "text/plain" in data:
+                                        text = data["text/plain"]
+                                        if isinstance(text, list):
+                                            text = "".join(text)
+                                        for line in text.strip().split("\n"):
+                                            self.output.emit(line)
+                except Exception as parse_err:
+                    self.output.emit(f"Warning: Could not parse notebook outputs: {parse_err}")
+
             # Copy output .npy files from temp run to project root (notebook runs in place)
             # The notebook saves to current dir, so outputs are in PROJECT_ROOT
             if temp_nb.exists():

@@ -1,8 +1,8 @@
 ================================================================================
 EEG-KINOVA PROJECT: SYSTEM ARCHITECTURE AND WORKING
 ================================================================================
-Document Version: 1.0
-Last Updated: March 2025
+Document Version: 2.0
+Last Updated: May 2026
 
 ================================================================================
 1. OVERVIEW
@@ -28,12 +28,23 @@ HARDWARE SETUP REFERENCE
 
 The controllers (kinova_eeg_controller.py, kinova_eeg_opencv_controller.py) and
 real_time_eeg_predictor.py use hardware_config.py for their settings. Edit
-hardware_config.py to change robot IP, angles, speed limits, EEG sample rate,
-camera settings, etc.
+hardware_config.py to change robot IP, angles, speed limits, camera settings,
+and EEG sampling parameters.
 
 The reference files keep their original configuration:
   - OpenCV/track_ball_kinova_test_fixed.py  → Kinova arm (standalone)
   - dataCollection.py                       → EEG headset (standalone)
+
+Current shared defaults in hardware_config.py:
+  - ROBOT_IP = "192.168.1.10"
+  - ANGLES_INIT = [97.39, 41.8, 194.35, 232.9, 317.41, 86.03, 86.24]
+  - LIMIT_M = 0.30
+  - V_MAX = 0.8
+  - AX_MAX = 0.80
+  - CAM_INDEX = 0
+  - WARP_W = 1280, WARP_H = 720
+  - EEG_FS = 250
+  - EEG_SAMPLES_PER_READ = 4
 
 Keep hardware_config.py values in sync with these references for consistency.
 
@@ -109,9 +120,9 @@ Purpose:
       (connection, sampling, buffer size) in real-time controllers follows this.
 
 Hardware (from dataCollection.py):
-  - Unicorn Hybrid Black: 8 EEG channels (or 17 for full device)
+  - Unicorn Hybrid Black: 8 EEG channels
   - Sampling rate: 250 Hz
-  - Connection: UnicornPy.GetAvailableDevices() → Unicorn(device) → StartAcquisition()
+  - Connection: UnicornPy.GetAvailableDevices(True) → Unicorn(device) → StartAcquisition(False)
   - Display: PyQt5 GUI showing baseline, instruction, and stimulus phases
 
 Data Flow:
@@ -121,8 +132,8 @@ Data Flow:
   4. CSV format: trial_index, class_label, phase, timestamp, Ch1...Ch8 (or Ch17)
 
 Output:
-  - EEG_bar_trials_{N}_classes_{K}_{timestamp}.csv
-  - Saved in project root or specified folder
+  - EEG_{mode}_trials_{trials}_classes_{classes}_{timestamp}.csv
+  - Saved under data/Subject <N>/<num_classes>_class/
 
 Key Parameters:
   - num_classes: 2 or 3 (or 5)
@@ -196,8 +207,8 @@ A) EEGNet (EEGNet_new_model.py, EEGNet_new_training.py)
      Classifier: Linear(flattened_size, num_classes)
 
    Key params: F1=16, D=2, F2=16, k_temporal=125, dropout_rate=0.5
-   Optional windowing in training for data augmentation
-   Saves to: outputs/eegnet_new_best.pth
+  Windowing in training for data augmentation uses window_size=250 and step_size=75
+  Training writes checkpoints into results/Subject_##/<n>_class/EEGNet/run_*/checkpoints/
 
 --------------------------------------------------------------------------------
 
@@ -218,9 +229,9 @@ B) FBMSNet (FBMSNet/codes/centralRepo/networks.py)
      Flatten
      LastBlock: LinearWithConstraint → Linear → LogSoftmax
 
-   Key params: nChan=8, nTime=248, num_Feat=36, dilatability=8, dropoutP=0.6
-   Expects data in FBMSNet/data/
-   Saves to: FBMSNet/fbmsnet_best_model.pth
+  Key params: nChan=8, nTime=248, num_Feat=36, dilatability=8, dropoutP=0.6
+  Expects data in FBMSNet/data/
+  Training writes checkpoints into results/Subject_##/<n>_class/FBMSNet/run_*/checkpoints/
 
 --------------------------------------------------------------------------------
 
@@ -237,51 +248,50 @@ C) CTNet (ctnet_model.py, ctnet_training.py)
      Pooling: avg + 0.3*max
      Classifier: Linear(16, n_classes)
 
-   CTNetLite (used in training):
+   CTNetLite (used for inference and small-data training paths):
      CTNetConvModule: F1=4, D=1, F2=8, Kc2=8, P1=5, P2=2
      TransformerEncoder: 2 layers, 2 heads, d_model=8
      Fusion + pooling (same as full)
      Classifier: Linear(8, n_classes)
 
    Key params (Lite): F1=4, D=1, F2=8, dropout_conv=0.5
-   Saves to: ctnet_best_model.pth
+   Training writes LR-specific checkpoints into results/Subject_##/<n>_class/CTNet/run_*/checkpoints/
 
 --------------------------------------------------------------------------------
 3.4 MODEL TRAINING CONFIGURATION
 --------------------------------------------------------------------------------
 
 A) EEGNet Training (EEGNet_new_training.py)
-   - Loss: CrossEntropyLoss with class weights (for imbalance)
-   - Optimizer: Adam, lr=1e-4, weight_decay=1e-4
-   - Scheduler: ReduceLROnPlateau (mode='min', factor=0.1, patience=10, min_lr=1e-6)
-   - Early stopping: patience=100, monitor val_loss
-   - Epochs: 300 (max)
-   - Batch size: 16
-   - Train/val split: 90/10
-   - Optional: Windowing (window_size=250, step_size=75) for data augmentation
-   - Saves: best model (val_loss), last model, log CSV, label map JSON
+  - Loss: CrossEntropyLoss with class weights (for imbalance)
+  - Optimizer: Adam, lr=1e-4, weight_decay=1e-4
+  - Scheduler: ReduceLROnPlateau (mode='min', factor=0.1, patience=10, min_lr=1e-6)
+  - Early stopping: patience=100, monitor val_loss
+  - Epochs: 300 (max)
+  - Batch size: 16
+  - Train/val split: 90/10
+  - Windowing: window_size=250, step_size=75 for data augmentation
+  - Saves: best model (val_loss), last model, log CSV, label map JSON in results/Subject_##/<n>_class/EEGNet/run_*/checkpoints/
 
 B) FBMSNet Training (FBMSNet/train_custom_fbmsnet_updated.py)
-   - Loss: CrossEntropyLoss
-   - Optimizer: Adam, lr=3e-3 (fixed, no scheduler)
-   - Epochs: 250
+  - Loss: NLLLoss (classifier head ends with LogSoftmax)
+  - Optimizer: Adam, lr=1e-3 (fixed, no scheduler)
+  - Epochs: 300
    - Batch size: 16
    - Train/val split: 90/10 random_split
    - Saves best model by validation accuracy
-   - Outputs: training curves PNG, confusion matrix PNG, checkpoint .pth
+  - Outputs: training curves PNG, confusion matrix PNG, checkpoint .pth in results/Subject_##/<n>_class/FBMSNet/run_*/checkpoints/
 
 C) CTNet Training (ctnet_training.py)
-   - Loss: FocalLoss (alpha=0.25, gamma=1.0) with class weights
-     (addresses class imbalance and hard examples)
+   - Loss: CrossEntropyLoss with class weights
    - Optimizer: AdamW, weight_decay=3e-4
-   - Learning rate search: tests [1e-4, 3e-4, 1e-3, 3e-3, 1e-2]
+   - Learning rate search: current active list is [1e-3]
    - Scheduler: ReduceLROnPlateau (mode='max', factor=0.5, patience=30, min_lr=1e-6)
    - Early stopping: patience=100, monitor validation accuracy
-   - Epochs: 300 per learning rate (LR search runs 5 LRs)
+   - Epochs: 300 per learning rate
    - Batch size: 16
    - Train/val split: 90/10
    - Gradient clipping: max_norm=1.0
-   - Saves best model across all LRs (highest val_acc)
+   - Saves best model across all LRs into results/Subject_##/<n>_class/CTNet/run_*/checkpoints/
 
 --------------------------------------------------------------------------------
 3.5 REAL-TIME EEG PREDICTOR (real_time_eeg_predictor.py)
@@ -291,13 +301,13 @@ Purpose:
   Load a trained model and run inference on streaming EEG data.
 
 Components:
-  - Buffer: Accumulates 250 samples (1 second at 250 Hz)
+  - Buffer: Accumulates 250 samples by default (1 second at 250 Hz)
   - Preprocessing: Bandpass filter (4-40 Hz), z-score normalization
   - Model inference: Forward pass, softmax for class probabilities
 
 Data Flow:
   1. add_samples(samples) - append (N, 8) samples to buffer
-  2. predict() - when buffer has 250 samples:
+  2. predict() - when buffer has enough samples for the selected model:
      - Apply bandpass filter
      - Z-score normalize
      - Reshape for model (depends on EEGNet/CTNet/FBMSNet)
@@ -305,9 +315,14 @@ Data Flow:
      - Return (predicted_class, probability_array)
 
 Model-Specific Input Shapes:
-  - EEGNet: (1, 1, 8, 250)
-  - CTNet: (1, 8, 250)
-  - FBMSNet: (1, 9, 8, 248) - simplified multiband replication for real-time
+  - EEGNet: (1, 1, 8, T), where T is inferred from the checkpoint when possible
+  - CTNet: (1, 8, 250) through CTNetLite
+  - FBMSNet: (1, 9, 8, 248) using replicated multiband input
+
+Checkpoint lookup:
+  - EEGNet: outputs/eegnet_new_best.pth, then eegnet_best_model.pth
+  - CTNet: ctnet_best_model.pth
+  - FBMSNet: FBMSNet/fbmsnet_best_model.pth
 
 --------------------------------------------------------------------------------
 3.6 KINOVA ARM CONTROL (OpenCV/track_ball_kinova_test_fixed.py) — ARM SETUP REFERENCE
@@ -317,13 +332,15 @@ Model-Specific Input Shapes:
       initial angles, velocity limits, and workspace constraints in the EEG
       controllers are taken from here.
 
-Kinova Settings (from track_ball_kinova_test_fixed.py):
+Kinova Settings (from hardware_config.py):
   - ROBOT_IP: 192.168.1.10
-  - ANGLES_INIT: [101.9, 39.18, 177.13, 246.77, 285.5, 86.98, 120.09]
+  - ANGLES_INIT: [97.39, 41.8, 194.35, 232.9, 317.41, 86.03, 86.24]
   - Movement: X-axis only (linear_x) - corresponds to bar up/down on screen
-  - V_MAX: 0.17 m/s
-  - LIMIT_M: 0.35 m (workspace corridor)
-  - Workspace: X between (x_start - 0.35) and x_start
+  - V_MAX: 0.8 m/s
+  - AX_MAX: 0.80
+  - LIMIT_M: 0.30 m (workspace corridor)
+  - CAM_INDEX: 0, WARP_W/H: 1280x720
+  - Workspace: X between (x_start - 0.30) and x_start
 
 Robot API:
   - connect_robot(): TCP connection, session, BaseClient, BaseCyclicClient
@@ -397,7 +414,7 @@ Threading:
 4. DATA FLOW SUMMARY
 ================================================================================
 
-  Raw CSV (EEG_bar_trials_*.csv)
+    Raw CSV (EEG_*.csv)
        |
        v
   data/2_class/ or data/3_class/  (copy by GUI)
@@ -445,20 +462,23 @@ real_time_eeg_predictor.py
 All hardware configuration is defined in the reference files. Modify there first,
 then propagate to controller files if needed.
 
-Robot (from OpenCV/track_ball_kinova_test_fixed.py):
+Robot (from hardware_config.py):
   ROBOT_IP = "192.168.1.10"
   USERNAME = "admin"
   PASSWORD = "admin"
-  ANGLES_INIT = [101.9, 39.18, 177.13, 246.77, 285.5, 86.98, 120.09]
-  V_MAX = 0.17
-  LIMIT_M = 0.35
-  CAM_INDEX, WARP_W, WARP_H, HSV thresholds, etc. (for Option 6)
+  ANGLES_INIT = [97.39, 41.8, 194.35, 232.9, 317.41, 86.03, 86.24]
+  V_MAX = 0.8
+  AX_MAX = 0.80
+  LIMIT_M = 0.30
+  CAM_INDEX = 0
+  WARP_W = 1280
+  WARP_H = 720
 
 EEG (from dataCollection.py):
   Unicorn Hybrid Black via UnicornPy
   FS = 250 Hz
-  N_CHANNELS = 8 (or 17 for full device)
-  GetAvailableDevices() → Unicorn(device) → StartAcquisition()
+  N_CHANNELS = 17 during collection, first 8 channels are used downstream
+  GetAvailableDevices(True) → Unicorn(device) → StartAcquisition(False)
   samples_per_read = 4, buffer_size = samples * channels * 4
 
 ================================================================================
