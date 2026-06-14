@@ -1,0 +1,7 @@
+{
+  "0.001": {
+    "best_val_acc": 64.44444444444444,
+    "best_epoch": 123,
+    "model_path": "C:\\Users\\Shivans1\\Desktop\\Kinova_arm_project\\EEG_Kinova_Project\\results\\Subject_04\\2_class\\CTNet\\run_20260605_182904\\checkpoints\\ctnet_best_model_lr_0.001000.pth"
+  }
+}

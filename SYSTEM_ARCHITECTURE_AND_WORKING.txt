@@ -1,495 +1,540 @@
 ================================================================================
 EEG-KINOVA PROJECT: SYSTEM ARCHITECTURE AND WORKING
 ================================================================================
-Document Version: 2.0
-Last Updated: May 2026
+Document Version: 3.0
+Last Updated: June 2026
 
 ================================================================================
 1. OVERVIEW
 ================================================================================
 
-The EEG-Kinova system is a Brain-Computer Interface (BCI) that allows users to
-control a Kinova robotic arm using EEG (electroencephalogram) signals. The
-system supports two modes of operation:
+The EEG-Kinova system is a Brain-Computer Interface (BCI) that lets users
+control a Kinova Gen3 robotic arm using EEG motor-imagery signals, optionally
+fused with OpenCV ball/bar tracking.
 
-  - Option 5: EEG-only control (arm moves purely based on EEG predictions)
-  - Option 6: EEG + OpenCV hybrid (arm speed depends on match between EEG
-    prediction and visual tracking)
+Operating modes:
+  - Option 5 (EEG-only):  kinova_eeg_controller.py
+      Position-based control. EEG predictions trigger go_to_angles moves to
+      predefined left/right joint poses. No camera.
 
-The complete pipeline consists of:
-  1. Data Collection (EEG signals from Unicorn device)
-  2. Preprocessing (prepare data for each model type)
-  3. Model Training (EEGNet, FBMSNet, CTNet)
-  4. Real-time Control (EEG prediction → Kinova arm movement)
+  - Option 6 (EEG + OpenCV):  kinova_eeg_opencv_controller.py
+      Velocity-based hybrid control. EEG sets direction; OpenCV sets speed.
+      Match between EEG and vision → full speed. Mismatch → 50% speed.
+
+  - OpenCV standalone:  OpenCV/track_ball_kinova_test_fixed.py
+      Vision-only bar tracking. No EEG.
+
+End-to-end pipeline:
+  1. Data Collection       (Unicorn EEG + PyQt5 GUI)
+  2. Preprocessing         (Jupyter notebooks per model)
+  3. Model Training        (EEGNet / CTNet / FBMSNet)
+  4. Real-time Control     (streaming inference → Kinova arm)
+  5. Evaluation / Paper    (offline Table I, online Hit/Miss/Gain/Loss plots)
 
 --------------------------------------------------------------------------------
 HARDWARE SETUP REFERENCE
 --------------------------------------------------------------------------------
 
-The controllers (kinova_eeg_controller.py, kinova_eeg_opencv_controller.py) and
-real_time_eeg_predictor.py use hardware_config.py for their settings. Edit
-hardware_config.py to change robot IP, angles, speed limits, camera settings,
-and EEG sampling parameters.
+Shared settings live in hardware_config.py. Controllers and the real-time
+predictor import from there. Reference implementations keep their own copies:
+  - OpenCV/track_ball_kinova_test_fixed.py  → Kinova + camera (standalone)
+  - dataCollection.py                       → Unicorn EEG (standalone)
 
-The reference files keep their original configuration:
-  - OpenCV/track_ball_kinova_test_fixed.py  → Kinova arm (standalone)
-  - dataCollection.py                       → EEG headset (standalone)
-
-Current shared defaults in hardware_config.py:
-  - ROBOT_IP = "192.168.1.10"
-  - ANGLES_INIT = [97.39, 41.8, 194.35, 232.9, 317.41, 86.03, 86.24]
-  - LIMIT_M = 0.30
-  - V_MAX = 0.8
-  - AX_MAX = 0.80
-  - CAM_INDEX = 0
-  - WARP_W = 1280, WARP_H = 720
-  - EEG_FS = 250
-  - EEG_SAMPLES_PER_READ = 4
-
-Keep hardware_config.py values in sync with these references for consistency.
+Current hardware_config.py defaults:
+  ROBOT_IP          = "192.168.1.10"
+  USERNAME/PASSWORD = "admin" / "admin"
+  ANGLES_INIT       = [97.39, 41.8, 194.35, 232.9, 317.41, 86.03, 86.24]
+  LIMIT_M           = 0.35          # workspace corridor (m)
+  V_MAX             = 0.8           # max Cartesian X velocity (m/s)
+  AX_MAX            = 0.80            # max acceleration slew (m/s²)
+  CAM_INDEX         = 0
+  WARP_W, WARP_H    = 1280, 720
+  CALIB_SIGN        = 1             # flip to -1 if bar moves opposite
+  HZ                = 60            # control loop rate (Option 6)
+  EEG_FS            = 250
+  EEG_SAMPLES_PER_READ = 4
 
 ================================================================================
-2. HIGH-LEVEL ARCHITECTURE
+2. CLASS LABEL MAPPING (2-CLASS)
 ================================================================================
 
-                    +------------------+
-                    |   USER (GUI)     |
-                    | eeg_kinova_     |
-                    | control_gui.py   |
-                    +--------+--------+
-                             |
-         +-------------------+-------------------+
-         |                   |                   |
-         v                   v                   v
-  +-------------+    +-------------+    +------------------+
-  | Data        |    | Preprocess  |    | Train Models     |
-  | Collection  |    | Notebooks   |    | EEGNet/FBMSNet/  |
-  | dataCollection|  | CTNet,      |    | CTNet            |
-  | .py         |    | FBMSNet,    |    |                  |
-  |             |    | EEGNet      |    |                  |
-  +------+------+    +------+------+    +--------+---------+
-         |                   |                   |
-         |                   v                   v
-         |            +-------------+    +------------------+
-         |            | .npy files  |<---| X_train, y_train |
-         |            | (processed  |    | X_test, y_test   |
-         |            |  EEG data)  |    |                  |
-         |            +------+------+    +------------------+
-         |                   |                   |
-         v                   v                   v
-  +-------------+    +-------------+    +------------------+
-  | CSV files   |--->| data/2_class|    | Model checkpoints |
-  | EEG_bar_    |    | data/3_class|    | .pth files        |
-  | trials_*.csv|    |             |    |                  |
-  +-------------+    +-------------+    +--------+---------+
-                                                 |
-                                                 v
-                    +--------------------------------------------------+
-                    |           REAL-TIME CONTROL                      |
-                    |  kinova_eeg_controller.py (Option 5)             |
-                    |  kinova_eeg_opencv_controller.py (Option 6)      |
-                    +------------------------+-------------------------+
-                             |                           |
-                             v                           v
-                    +----------------+          +------------------+
-                    | Unicorn EEG    |          | Kinova Arm       |
-                    | (250 Hz, 8 ch) |          | (X-axis only,    |
-                    |                |          |  up/down bar)    |
-                    +----------------+          +------------------+
-                             |                           |
-                             v                           |
-                    +----------------+                    |
-                    | real_time_     |                    |
-                    | eeg_predictor  |--------------------+
-                    | .py            |
-                    +----------------+
+Data collection (dataCollection.py):
+  CSV class 1 = "Up (Right Arm)"
+  CSV class 2 = "Down (Left Arm)"
+
+After preprocessing (LabelEncoder):
+  Model class 0 = Up / Right
+  Model class 1 = Down / Left
+
+Robot / OpenCV direction convention (with CALIB_SIGN = +1):
+  Class 0 → negative Cartesian X velocity (up on screen)
+  Class 1 → positive Cartesian X velocity (down on screen)
+
+Option 5 position targets (kinova_eeg_controller.py):
+  Class 0 → RIGHT_ANGLES  (offset pose)
+  Class 1 → LEFT_ANGLES   (= ANGLES_INIT)
 
 ================================================================================
-3. COMPONENT DETAILS
+3. HIGH-LEVEL ARCHITECTURE
+================================================================================
+
+                         +---------------------------+
+                         |  eeg_kinova_control_gui.py |
+                         |  Collect → Preprocess →    |
+                         |  Train → Deploy            |
+                         +-------------+-------------+
+                                       |
+           +---------------------------+---------------------------+
+           |                           |                           |
+           v                           v                           v
+  +----------------+          +----------------+          +------------------+
+  | dataCollection |          | Preprocessing  |          | Training scripts |
+  | .py            |          | notebooks      |          | EEGNet / CTNet / |
+  | Unicorn 250 Hz |          | EEGNet/CTNet/  |          | FBMSNet          |
+  +-------+--------+          | FBMSNet        |          +--------+---------+
+          |                   +-------+--------+                   |
+          v                           v                            v
+  +----------------+          +----------------+          +------------------+
+  | CSV trials     |--------->| .npy arrays    |--------->| results/         |
+  | data/Subject_N |          | X_train, etc.  |          | Subject_XX/      |
+  +----------------+          +----------------+          | 2_class/MODEL/   |
+                                                           | run_*/checkpoints|
+                                                           +--------+---------+
+                                                                    |
+                    +-----------------------------------------------+
+                    |
+                    v
+         +------------------------------------------------------+
+         |              REAL-TIME CONTROL                        |
+         |  real_time_eeg_predictor.py (shared inference)        |
+         +------------------------+-----------------------------+
+                                  |
+              +-------------------+-------------------+
+              |                                       |
+              v                                       v
+  +------------------------+            +---------------------------+
+  | kinova_eeg_controller  |            | kinova_eeg_opencv_        |
+  | (Option 5)             |            | controller (Option 6)     |
+  | Position: go_to_angles |            | Velocity: send_vx         |
+  +-----------+------------+            +------+--------+-----------+
+              |                                |        |
+              v                                v        v
+  +-------------------+              +---------+  +-----------+
+  | Kinova Gen3 Arm   |<-------------| Camera  |  | Kalman +  |
+  | Cartesian X only  |              | 60 Hz   |  | HSV track |
+  +-------------------+              +---------+  +-----------+
+              ^
+              |
+  +-------------------+
+  | Unicorn EEG       |
+  | 8 ch @ 250 Hz     |
+  +-------------------+
+
+Paper / evaluation (paper/):
+  - build_table_i.py          → offline accuracy table from results/
+  - plot_online_hit_miss.py   → online Hit/Miss/Gain/Loss figures
+  - plot_subject_performance.py → offline vs online comparison figures
+  - generate_fig1_system_architecture.py → system diagram PNG
+  - ieee_bsn2026.tex          → conference paper
+
+================================================================================
+4. COMPONENT DETAILS
 ================================================================================
 
 --------------------------------------------------------------------------------
-3.1 DATA COLLECTION (dataCollection.py) — EEG HEADSET SETUP REFERENCE
+4.1 DATA COLLECTION (dataCollection.py)
 --------------------------------------------------------------------------------
 
 Purpose:
-  Collects EEG data from the Unicorn Hybrid Black device while the user performs
-  motor imagery tasks (e.g., thinking about different colors/directions).
+  Record EEG during motor-imagery trials with a PyQt5 GUI.
 
-  *** This file is the REFERENCE for EEG headset setup. All EEG streaming logic
-      (connection, sampling, buffer size) in real-time controllers follows this.
+Hardware:
+  - Unicorn Hybrid Black, 8 EEG channels used downstream (17 acquired)
+  - 250 Hz sampling via UnicornPy
+  - GetAvailableDevices(True) → Unicorn(device) → StartAcquisition(False)
 
-Hardware (from dataCollection.py):
-  - Unicorn Hybrid Black: 8 EEG channels
-  - Sampling rate: 250 Hz
-  - Connection: UnicornPy.GetAvailableDevices(True) → Unicorn(device) → StartAcquisition(False)
-  - Display: PyQt5 GUI showing baseline, instruction, and stimulus phases
+Trial structure per class:
+  Baseline → Instruction (color cue) → Stimulus (motor imagery)
 
-Data Flow:
-  1. User starts experiment → stabilization phase (e.g., 20 seconds)
-  2. For each trial: Baseline → Instruction (think about color) → Stimulus
-  3. UnicornRecorder thread reads samples via GetData(), writes to CSV
-  4. CSV format: trial_index, class_label, phase, timestamp, Ch1...Ch8 (or Ch17)
+2-class labels:
+  1 = Up (Right Arm),  2 = Down (Left Arm)
 
 Output:
-  - EEG_{mode}_trials_{trials}_classes_{classes}_{timestamp}.csv
-  - Saved under data/Subject <N>/<num_classes>_class/
+  EEG_{mode}_trials_{N}_classes_{C}_{timestamp}.csv
+  Saved under: data/Subject <N>/<num_classes>_class/
 
-Key Parameters:
-  - num_classes: 2 or 3 (or 5)
-  - trials_per_class: e.g., 20 or 50
-  - baseline_ms, instruction_display_ms, stim_ms: phase durations
+Key columns: trial_index, class_label, phase, timestamp, Ch1…Ch8
 
 --------------------------------------------------------------------------------
-3.2 PREPROCESSING (preprocessing_3_class_*.ipynb)
+4.2 PREPROCESSING (preprocessing_3_class_*.ipynb)
 --------------------------------------------------------------------------------
 
-Purpose:
-  Convert raw CSV EEG data into model-ready .npy arrays with proper filtering,
-  trial extraction, and normalization.
+Three notebooks — one per model architecture:
 
-Three Notebooks (one per model):
+  preprocessing_3_class_EEGNet.ipynb
+    Filter: 4–40 Hz Butterworth (filtfilt), z-score
+    Output: (N, 1, 8, T)  →  X_train_eegnet.npy, y_train_eegnet.npy, etc.
 
-  A) preprocessing_3_class_CTNet.ipynb
-     - Input: CSV from data/2_class/ or data/3_class/
-     - Bandpass filter: Butterworth, zero-phase (filtfilt)
-       * FILTER_TYPE='notebook': 4-40 Hz, order=5
-       * FILTER_TYPE='data_curation': 8-30 Hz, order=5
-     - Trial extraction: trial_index-based or automatic phase detection
-     - Output shape: (N, 8, 250) - N samples, 8 channels, 250 timepoints (1 sec)
-     - Output files: X_train_ctnet.npy, y_train_ctnet.npy, X_test_ctnet.npy,
-       y_test_ctnet.npy
+  preprocessing_3_class_CTNet.ipynb
+    Filter: 4–40 Hz Butterworth (filtfilt)
+    Output: (N, 8, 250)    →  X_train_ctnet.npy, y_train_ctnet.npy, etc.
 
-  B) preprocessing_3_class_FBMSNet.ipynb
-     - Input: Same CSV
-     - Bandpass filter: Two-stage
-       * Stage 1: Broad bandpass 4-40 Hz (or 8-30 Hz via FILTER_TYPE), order=4
-       * Stage 2: 9-band filterbank (delta, theta, alpha, beta, etc.) - each band
-         uses bandpass_filter_band(lowcut, highcut) with butter + filtfilt
-     - Baseline normalization (baseline also bandpass-filtered)
-     - Output shape: (N, 9, 8, 248) - N samples, 9 bands, 8 channels, 248 timepoints
-     - Output files: X_train_fbmsnet.npy, y_train_fbmsnet.npy, etc.
+  preprocessing_3_class_FBMSNet.ipynb
+    Filter: 4–40 Hz broad + 9-band filterbank
+    Output: (N, 9, 8, 248) →  X_train_fbmsnet.npy, y_train_fbmsnet.npy, etc.
 
-  C) preprocessing_3_class_EEGNet.ipynb
-     - Input: Same CSV
-     - Bandpass filter: Butterworth, zero-phase (filtfilt)
-       * FILTER_TYPE='notebook': 4-40 Hz, order=5
-       * FILTER_TYPE='data_curation': 8-30 Hz, order=5
-     - Epoch creation, baseline normalization (baseline also bandpass-filtered)
-     - Output shape: (N, 1, 8, T) - N samples, 1 (EEGNet expects 4D), 8 channels
-     - Output files: X_train_eegnet.npy, y_train_eegnet.npy, etc.
+Label encoding: sklearn LabelEncoder maps CSV labels {1,2} → model {0,1}.
 
-GUI Integration:
-  - NotebookWorker patches notebook JSON to use data/N_class/ path
-  - Runs nbconvert --execute on each notebook sequentially
-  - Copies CSV files from user-selected folder to data/2_class/ or data/3_class/
+GUI integration (eeg_kinova_control_gui.py):
+  - Copies user CSVs to data/2_class/ or data/3_class/
+  - Patches notebook paths and runs nbconvert --execute sequentially
 
 --------------------------------------------------------------------------------
-3.3 MODEL ARCHITECTURES
+4.3 MODEL TRAINING
 --------------------------------------------------------------------------------
 
-A) EEGNet (EEGNet_new_model.py, EEGNet_new_training.py)
-   - Input: (batch, 1, 8, 250) or (batch, 8, 250)
-   - Output: (batch, num_classes)
+Scripts:
+  EEGNet_new_training.py
+  ctnet_training.py
+  FBMSNet/train_custom_fbmsnet_updated.py
 
-   Architecture (Improved EEGNet):
-     Block 1 - Temporal Conv:
-       Conv2d(1, F1=16, kernel=(1, 125)), BatchNorm
-       → Learns temporal/frequency features (0.5s kernel at 250 Hz)
-     Block 2 - Depthwise Spatial Conv:
-       Conv2d(F1, F1*D=32, kernel=(8, 1), groups=F1), BatchNorm, ELU
-       AvgPool2d(1, 4) → reduces time by 4x
-       SpatialDropout2d or Dropout
-     Block 3 - Separable Conv:
-       Conv2d(32, F2=16, kernel=(1, 16)), BatchNorm, ELU
-       AvgPool2d(1, 8) → reduces time by 8x
-       Dropout
-     Classifier: Linear(flattened_size, num_classes)
+Output structure (per subject, per model):
+  results/Subject_XX/2_class/<MODEL>/run_YYYYMMDD_HHMMSS/
+    checkpoints/   *.pth, *_label_map.json
+    metrics/       *_summary.json, classification reports
+    figures/       confusion matrix, training curves
 
-   Key params: F1=16, D=2, F2=16, k_temporal=125, dropout_rate=0.5
-  Windowing in training for data augmentation uses window_size=250 and step_size=75
-  Training writes checkpoints into results/Subject_##/<n>_class/EEGNet/run_*/checkpoints/
+EEGNet (EEGNet_new_model.py):
+  Input:  (batch, 1, 8, T)   Output: logits (num_classes)
+  Key params: F1=16, D=2, F2=16, k_temporal=125, dropout=0.5
+  Loss: CrossEntropyLoss + class weights
+  Optimizer: Adam lr=1e-4, ReduceLROnPlateau, early stopping patience=100
 
---------------------------------------------------------------------------------
+CTNet (ctnet_model.py — CTNetLite for inference):
+  Input:  (batch, 8, 250)    Output: (logits, features)
+  Key params (Lite): F1=4, D=1, F2=8, 2 transformer layers
+  Loss: CrossEntropyLoss + class weights
+  Optimizer: AdamW, LR search, gradient clip max_norm=1.0
 
-B) FBMSNet (FBMSNet/codes/centralRepo/networks.py)
-   - Input: (batch, 9, 8, 248) - 9 frequency bands, 8 channels, 248 timepoints
-   - Output: (logits, features) - LastBlock uses LogSoftmax
+FBMSNet (FBMSNet/codes/centralRepo/networks.py):
+  Input:  (batch, 9, 8, 248) Output: (logits LogSoftmax, features)
+  Key params: num_Feat=36, dilatability=8, dropoutP=0.6
+  Loss: NLLLoss (LogSoftmax head)
+  Optimizer: Adam lr=1e-3
 
-   Architecture (FBMSNet with MixedConv2d):
-     MixedConv2d (temporal multi-scale):
-       9 in → num_Feat=36 out, kernel sizes [(1,15),(1,31),(1,63),(1,125)]
-       → 4 parallel convs with different temporal receptive fields
-       BatchNorm
-     SCB (Spatial Convolution Block):
-       Conv2dWithConstraint(36, 36*dilatability=288, (8,1), groups=36)
-       BatchNorm, swish
-     Reshape: [*, *, 4, T/4] (strideFactor=4)
-     Temporal aggregator: LogVarLayer(dim=3) - log variance over time
-     Flatten
-     LastBlock: LinearWithConstraint → Linear → LogSoftmax
-
-  Key params: nChan=8, nTime=248, num_Feat=36, dilatability=8, dropoutP=0.6
-  Expects data in FBMSNet/data/
-  Training writes checkpoints into results/Subject_##/<n>_class/FBMSNet/run_*/checkpoints/
+training_artifacts.py — shared helpers for run directories, metrics JSON,
+confusion matrices, and figure export.
 
 --------------------------------------------------------------------------------
-
-C) CTNet (ctnet_model.py, ctnet_training.py)
-   - Input: (batch, 8, 250)
-   - Output: (logits, features) - training returns tuple
-
-   Full CTNet (optional):
-     CTNetConvModule: Temporal Conv → Depthwise → Spatial Conv
-       F1=8, D=2, F2=16, Kc1≈63, P1=8, P2=2 → (B, Tc≈15, 16)
-     PositionalEncoding (optional)
-     TransformerEncoder: 6 layers, 2 heads, d_model=16
-     Fusion: seq_cnn + seq_transformer
-     Pooling: avg + 0.3*max
-     Classifier: Linear(16, n_classes)
-
-   CTNetLite (used for inference and small-data training paths):
-     CTNetConvModule: F1=4, D=1, F2=8, Kc2=8, P1=5, P2=2
-     TransformerEncoder: 2 layers, 2 heads, d_model=8
-     Fusion + pooling (same as full)
-     Classifier: Linear(8, n_classes)
-
-   Key params (Lite): F1=4, D=1, F2=8, dropout_conv=0.5
-   Training writes LR-specific checkpoints into results/Subject_##/<n>_class/CTNet/run_*/checkpoints/
-
---------------------------------------------------------------------------------
-3.4 MODEL TRAINING CONFIGURATION
+4.4 OFFLINE EVALUATION (paper/build_table_i.py)
 --------------------------------------------------------------------------------
 
-A) EEGNet Training (EEGNet_new_training.py)
-  - Loss: CrossEntropyLoss with class weights (for imbalance)
-  - Optimizer: Adam, lr=1e-4, weight_decay=1e-4
-  - Scheduler: ReduceLROnPlateau (mode='min', factor=0.1, patience=10, min_lr=1e-6)
-  - Early stopping: patience=100, monitor val_loss
-  - Epochs: 300 (max)
-  - Batch size: 16
-  - Train/val split: 90/10
-  - Windowing: window_size=250, step_size=75 for data augmentation
-  - Saves: best model (val_loss), last model, log CSV, label map JSON in results/Subject_##/<n>_class/EEGNet/run_*/checkpoints/
+Scans results/ for the latest run per subject per model and builds Table I.
 
-B) FBMSNet Training (FBMSNet/train_custom_fbmsnet_updated.py)
-  - Loss: NLLLoss (classifier head ends with LogSoftmax)
-  - Optimizer: Adam, lr=1e-3 (fixed, no scheduler)
-  - Epochs: 300
-   - Batch size: 16
-   - Train/val split: 90/10 random_split
-   - Saves best model by validation accuracy
-  - Outputs: training curves PNG, confusion matrix PNG, checkpoint .pth in results/Subject_##/<n>_class/FBMSNet/run_*/checkpoints/
+Subjects: 01, 02, 03, 04, 10, 11, 12
+Models:   EEGNet, CTNet, FBMSNet
 
-C) CTNet Training (ctnet_training.py)
-   - Loss: CrossEntropyLoss with class weights
-   - Optimizer: AdamW, weight_decay=3e-4
-   - Learning rate search: current active list is [1e-3]
-   - Scheduler: ReduceLROnPlateau (mode='max', factor=0.5, patience=30, min_lr=1e-6)
-   - Early stopping: patience=100, monitor validation accuracy
-   - Epochs: 300 per learning rate
-   - Batch size: 16
-   - Train/val split: 90/10
-   - Gradient clipping: max_norm=1.0
-   - Saves best model across all LRs into results/Subject_##/<n>_class/CTNet/run_*/checkpoints/
+Output: paper/table_i_data.json
+Reads:  *_summary.json → accuracy_pct = accuracy * 100
+
+Example mean accuracies (S2, S3, S10, S11, S12 — user-reported):
+  EEGNet  70.30%   CTNet  54.04%   FBMSNet  58.83%
 
 --------------------------------------------------------------------------------
-3.5 REAL-TIME EEG PREDICTOR (real_time_eeg_predictor.py)
+4.5 REAL-TIME EEG PREDICTOR (real_time_eeg_predictor.py)
 --------------------------------------------------------------------------------
 
 Purpose:
-  Load a trained model and run inference on streaming EEG data.
+  Load a trained checkpoint and run inference on a rolling EEG buffer.
 
-Components:
-  - Buffer: Accumulates 250 samples by default (1 second at 250 Hz)
-  - Preprocessing: Bandpass filter (4-40 Hz), z-score normalization
-  - Model inference: Forward pass, softmax for class probabilities
+Buffer:
+  WINDOW_SAMPLES = 250  (1 second at 250 Hz)
 
-Data Flow:
-  1. add_samples(samples) - append (N, 8) samples to buffer
-  2. predict() - when buffer has enough samples for the selected model:
-     - Apply bandpass filter
-     - Z-score normalize
-     - Reshape for model (depends on EEGNet/CTNet/FBMSNet)
-     - Run model.forward()
-     - Return (predicted_class, probability_array)
+Preprocessing (matches training):
+  1. Bandpass 4–40 Hz (Butterworth, filtfilt per channel)
+  2. Z-score normalization
 
-Model-Specific Input Shapes:
-  - EEGNet: (1, 1, 8, T), where T is inferred from the checkpoint when possible
-  - CTNet: (1, 8, 250) through CTNetLite
-  - FBMSNet: (1, 9, 8, 248) using replicated multiband input
+Inference:
+  predict() → (class_idx, prob_array) or (None, None) if buffer too short
+  Default rate in controllers: every 0.5 s (2 Hz)
 
-Checkpoint lookup:
-  - EEGNet: outputs/eegnet_new_best.pth, then eegnet_best_model.pth
-  - CTNet: ctnet_best_model.pth
-  - FBMSNet: FBMSNet/fbmsnet_best_model.pth
+Model input shapes:
+  EEGNet:  (1, 1, 8, T)  — T inferred from checkpoint when possible
+  CTNet:   (1, 8, 250)   via CTNetLite
+  FBMSNet: (1, 9, 8, 248) — replicated multiband input
 
---------------------------------------------------------------------------------
-3.6 KINOVA ARM CONTROL (OpenCV/track_ball_kinova_test_fixed.py) — ARM SETUP REFERENCE
---------------------------------------------------------------------------------
+Default checkpoint search:
+  EEGNet:  outputs/eegnet_new_best.pth
+  CTNet:   ctnet_best_model.pth
+  FBMSNet: FBMSNet/fbmsnet_best_model.pth
 
-  *** This file is the REFERENCE for Kinova arm setup. All robot connection,
-      initial angles, velocity limits, and workspace constraints in the EEG
-      controllers are taken from here.
-
-Kinova Settings (from hardware_config.py):
-  - ROBOT_IP: 192.168.1.10
-  - ANGLES_INIT: [97.39, 41.8, 194.35, 232.9, 317.41, 86.03, 86.24]
-  - Movement: X-axis only (linear_x) - corresponds to bar up/down on screen
-  - V_MAX: 0.8 m/s
-  - AX_MAX: 0.80
-  - LIMIT_M: 0.30 m (workspace corridor)
-  - CAM_INDEX: 0, WARP_W/H: 1280x720
-  - Workspace: X between (x_start - 0.30) and x_start
-
-Robot API:
-  - connect_robot(): TCP connection, session, BaseClient, BaseCyclicClient
-  - go_to_angles(base, base_cyc, ANGLES_INIT): Move to initial pose
-  - send_vx(base, vx): Send velocity command (linear_x only)
-  - get_x(base): Get current X position for workspace limits
+Override with:  --model-path path/to/model.pth
 
 --------------------------------------------------------------------------------
-3.7 OPTION 5: EEG-ONLY CONTROLLER (kinova_eeg_controller.py)
+4.6 KINOVA ARM REFERENCE (OpenCV/track_ball_kinova_test_fixed.py)
 --------------------------------------------------------------------------------
 
-Purpose:
-  Control the Kinova arm purely from EEG predictions. No camera or OpenCV.
+Standalone vision-only bar tracker. Reference for:
+  - Robot TCP connection (Kortex API)
+  - ANGLES_INIT initial pose
+  - send_vx(linear_x) — Cartesian X velocity only (bar up/down)
+  - Workspace corridor: X between start and start − LIMIT_M
+  - HSV ball/bar detection, Kalman filter, predictive intercept control
+
+All Option 6 vision math is ported from this file into
+kinova_eeg_opencv_controller.py via hardware_config.py.
+
+--------------------------------------------------------------------------------
+4.7 OPTION 5: EEG-ONLY CONTROLLER (kinova_eeg_controller.py)
+--------------------------------------------------------------------------------
+
+Control paradigm: POSITION-BASED (not velocity).
 
 Flow:
-  1. Connect to Kinova → move to ANGLES_INIT
-  2. Start EEG stream (Unicorn or mock)
-  3. Every 1 second: predict class from EEG buffer
-  4. Map class to velocity:
-     - Class 0: vx = -V_MAX (one direction)
-     - Class 1: vx = +V_MAX (other direction)
-     - Class 2 (3-class): vx = 0 (stop)
-  5. Clamp: respect workspace limits (X_MIN, X_MAX)
-  6. send_vx(base, vx)
+  1. Connect Kinova → go_to_angles(ANGLES_INIT)
+  2. Start Unicorn EEG stream (background thread → predictor buffer)
+  3. Optional stabilization hold (--stabilization-seconds)
+  4. Every PREDICTION_INTERVAL_S = 0.5 s:
+     a) predictor.predict() → class 0 or 1 (or None if buffer filling)
+     b) Map class to target joint angles:
+          Class 0 → RIGHT_ANGLES
+          Class 1 → LEFT_ANGLES (= ANGLES_INIT)
+     c) If no movement in progress AND target changed:
+          Launch async go_to_angles(target, timeout=15 s)
+     d) Gating: skip if same target as last command or move still running
+  5. Logs predictions and robot X position to logs/kinova_eeg_controller_*.log
+
+Key settings:
+  PREDICTION_INTERVAL_S = 0.5
+  BOUNDARY_MARGIN_M     = 0.03
+  COMMAND_TIMEOUT_S     = 0.9  (watchdog for stale commands)
+
+No camera. No OpenCV. Movement is discrete left/right pose switches.
 
 --------------------------------------------------------------------------------
-3.8 OPTION 6: EEG + OPENCV CONTROLLER (kinova_eeg_opencv_controller.py)
+4.8 OPTION 6: EEG + OPENCV CONTROLLER (kinova_eeg_opencv_controller.py)
 --------------------------------------------------------------------------------
 
-Purpose:
-  Control the arm using both EEG and visual tracking. Match = fast, mismatch =
-  slow.
+Control paradigm: VELOCITY-BASED hybrid fusion.
+Position moves (go_to_angles) are DISABLED in the current version.
 
 Flow:
-  1. Camera calibration: user clicks 4 corners (TL, TR, BR, BL)
-  2. Connect Kinova → move to ANGLES_INIT
+  1. Camera calibration: user clicks 4 corners (TL, TR, BR, BL) → warp
+  2. Connect Kinova → go_to_angles(ANGLES_INIT)
   3. Start EEG stream
-  4. Main loop (60 Hz):
-     a) Capture frame, warp to top-down view
-     b) Detect blue ball (HSV), red bar (HSV)
-     c) Kalman filter for ball position and velocity
-     d) Compute vx_cmd from vision: where bar should move to intercept ball
-     e) OpenCV direction: vx < -0.02 → 0, vx > 0.02 → 1, else → 2
-     f) EEG prediction (every 0.5 s)
-     g) Match/mismatch:
-        - If EEG_pred == OpenCV_dir: vx_cmd *= 1.0 (fast)
-        - If EEG_pred != OpenCV_dir: vx_cmd *= 0.25 (slow)
-     h) send_vx(base, vx_cmd)
+  4. Main loop at HZ = 60:
+     a) Capture frame, perspective-warp to top-down view
+     b) HSV detect blue ball, red bar
+     c) Kalman filter → ball position (kpx, kpy) and velocity (kvx, kvy)
+     d) Vision control law (from track_ball):
+          Compute desired bar velocity → vx_cmd (m/s, clamped ±V_MAX)
+          opencv_dir = vx_to_direction(vx_cmd):
+            vx < -0.02 → class 0 (up)
+            vx > +0.02 → class 1 (down)
+            else       → None (ambiguous / stop)
+     e) EEG prediction every PREDICTION_INTERVAL_S = 0.5 s
+        Held for VELOCITY_HOLD_S = 0.8 s between fresh predictions
+     f) Hybrid fusion:
+          EEG always sets DIRECTION:
+            Class 0 → sign = -1.0
+            Class 1 → sign = +1.0
+          OpenCV sets SPEED MAGNITUDE:
+            If opencv_dir available:
+              speed = |opencv_vx| clamped to [0.01, V_MAX]
+              If EEG class == opencv_dir:  speed × V_FAST_MULT (1.0)  → FAST
+              If EEG class != opencv_dir:  speed × V_SLOW_MULT (0.5)  → SLOW
+            Else (no vision direction):
+              speed = BASE_VX (0.177)
+          Final command:
+            vx_cmd = CALIB_SIGN × sign × speed
+     g) If no EEG (fresh or held): vx_cmd = 0 (robot stops)
+     h) Workspace guard: clamp vx_cmd to 0 at X_MIN / X_MAX
+     i) send_vx(base, vx_cmd) every loop iteration
+  5. HUD overlay: EEG class, OpenCV dir, vx_cmd, match status
+  6. Logs to logs/kinova_eeg_opencv_controller_*.log
 
-Logic:
-  When the user's EEG prediction agrees with where the ball is going (OpenCV),
-  the arm moves at full speed. When they disagree, the arm moves slowly to
-  reduce errors or allow correction.
+Key constants:
+  V_FAST_MULT = 1.0    (match → full OpenCV speed)
+  V_SLOW_MULT = 0.5    (mismatch → half speed)
+  BASE_VX     = 0.177  (EEG-only fallback speed)
+  DIR_THRESHOLD = 0.02 m/s
+
+Design rationale (see EEG_vs_EEG-OpenCV_Issues.md):
+  Position moves conflict with continuous OpenCV velocity correction.
+  EEG direction + vision speed gives responsive, visible hybrid behaviour.
 
 --------------------------------------------------------------------------------
-3.9 GUI (eeg_kinova_control_gui.py)
+4.9 GUI (eeg_kinova_control_gui.py)
 --------------------------------------------------------------------------------
 
 Tabs:
-  1. Data Collection: Launch dataCollection.py in new window
-  2. Preprocessing: Select 2/3 class, copy CSVs, run 3 notebooks sequentially
-  3. Training: Select models, run training scripts
-  4. EEG → Kinova (Option 5): Launch kinova_eeg_controller.py
-  5. EEG + OpenCV (Option 6): Launch kinova_eeg_opencv_controller.py
+  1. Data Collection    → launches dataCollection.py
+  2. Preprocessing      → 2/3-class, copy CSVs, run 3 notebooks
+  3. Training           → EEGNet / CTNet / FBMSNet with subject selection
+  4. EEG → Kinova       → kinova_eeg_controller.py (Option 5)
+  5. EEG + OpenCV       → kinova_eeg_opencv_controller.py (Option 6)
 
-Threading:
-  - WorkerThread: Runs subprocess (training), emits stdout to log
-  - NotebookWorker: Patches and executes Jupyter notebooks
+Training env: conda env "torch37" (or EEG_KINOVA_CONDA_ENV), or local
+.conda/python.exe if present.
+
+Workers:
+  WorkerThread   — subprocess for training / control scripts
+  NotebookWorker — patches notebook JSON, runs nbconvert --execute
+
+--------------------------------------------------------------------------------
+4.10 ONLINE EVALUATION (paper/plot_online_hit_miss.py)
+--------------------------------------------------------------------------------
+
+Metrics from paper evaluation forms (per subject, per mode):
+  Hit, Miss, Gain, Loss
+
+Modes:
+  EEG_only    — Option 5 sessions
+  EEG_Vision  — Option 6 sessions
+
+Data source: SUBJECT_DATA dict in plot_online_hit_miss.py (edit directly).
+Optional: paper/subject_online_scores.csv for trial-by-trial plots.
+
+Generated figures (paper/figures/):
+  online_fig1_success_rate.png          — bar: Hit/(Hit+Miss) per subject
+  online_fig2_hit_miss_stacked.png      — stacked Hit/Miss
+  online_fig3_all_metrics_by_subject.png
+  online_fig4_improvement_delta.png     — hybrid − EEG-only success rate
+  online_fig5_net_score.png             — (Hit+Gain) − (Miss+Loss)
+  online_line_by_subject_*.png          — line graphs, subject on x-axis
+  online_offline_accuracy_by_subject.png — offline Table I line graph
 
 ================================================================================
-4. DATA FLOW SUMMARY
+5. DATA FLOW SUMMARY
 ================================================================================
 
-    Raw CSV (EEG_*.csv)
+  Unicorn EEG (250 Hz, 8 ch)
        |
        v
-  data/2_class/ or data/3_class/  (copy by GUI)
+  dataCollection.py  →  CSV  →  data/Subject_N/N_class/
        |
        v
-  Preprocessing notebooks (CTNet, FBMSNet, EEGNet)
+  preprocessing_3_class_{EEGNet,CTNet,FBMSNet}.ipynb
        |
        v
-  .npy files (X_train, y_train, X_test, y_test)
+  .npy (X_train, y_train, X_test, y_test)
        |
        v
-  Training scripts
+  Training scripts  →  results/Subject_XX/2_class/MODEL/run_*/checkpoints/*.pth
+       |
+       +--- build_table_i.py  →  paper/table_i_data.json (offline accuracy)
        |
        v
-  Model checkpoints (.pth)
+  real_time_eeg_predictor.py  ←── load .pth checkpoint
        |
-       v
-  Real-time: Unicorn EEG stream → buffer → predictor → Kinova arm
+       +--- Option 5: kinova_eeg_controller.py
+       |       EEG class → go_to_angles (LEFT/RIGHT pose)
+       |
+       +--- Option 6: kinova_eeg_opencv_controller.py
+               EEG class → direction sign
+               OpenCV    → speed magnitude + match/mismatch scaling
+               → send_vx (Cartesian X velocity)
 
 ================================================================================
-5. FILE DEPENDENCIES
+6. KEY FILE MAP
 ================================================================================
 
-eeg_kinova_control_gui.py
-  - Launches: dataCollection.py, preprocessing notebooks, EEGNet_new_training.py,
-    FBMSNet/train_custom_fbmsnet_updated.py, ctnet_training.py,
-    kinova_eeg_controller.py, kinova_eeg_opencv_controller.py
+Core pipeline:
+  dataCollection.py                  EEG data collection GUI
+  hardware_config.py                 Shared robot + camera + EEG settings
+  real_time_eeg_predictor.py         Streaming inference
+  kinova_eeg_controller.py           Option 5 — EEG-only position control
+  kinova_eeg_opencv_controller.py    Option 6 — EEG+vision velocity hybrid
+  eeg_kinova_control_gui.py          Unified orchestration GUI
 
-kinova_eeg_controller.py
-  - Imports: real_time_eeg_predictor
-  - Uses: UnicornPy, kortex_api
+Training:
+  EEGNet_new_model.py / EEGNet_new_training.py
+  ctnet_model.py / ctnet_training.py
+  FBMSNet/train_custom_fbmsnet_updated.py
+  training_artifacts.py
 
-kinova_eeg_opencv_controller.py
-  - Imports: real_time_eeg_predictor, filterpy, cv2
-  - Uses: UnicornPy, kortex_api
+Vision reference:
+  OpenCV/track_ball_kinova_test_fixed.py
 
-real_time_eeg_predictor.py
-  - Imports: EEGNet_new_model OR ctnet_model OR FBMSNet/codes.centralRepo.networks
-  - torch, numpy, scipy.signal
+Preprocessing:
+  preprocessing_3_class_EEGNet.ipynb
+  preprocessing_3_class_CTNet.ipynb
+  preprocessing_3_class_FBMSNet.ipynb
 
-================================================================================
-6. CONFIGURATION PARAMETERS
-================================================================================
+Diagnostics:
+  eeg_data_diagnostic.py             Per-subject bandpower plots
+  eeg_separability_cv.py             Cross-validated separability analysis
 
-All hardware configuration is defined in the reference files. Modify there first,
-then propagate to controller files if needed.
+Paper / figures:
+  paper/build_table_i.py
+  paper/plot_online_hit_miss.py
+  paper/plot_subject_performance.py
+  paper/generate_fig1_system_architecture.py
+  paper/ieee_bsn2026.tex
+  paper/figures/                     Generated PNG outputs
 
-Robot (from hardware_config.py):
-  ROBOT_IP = "192.168.1.10"
-  USERNAME = "admin"
-  PASSWORD = "admin"
-  ANGLES_INIT = [97.39, 41.8, 194.35, 232.9, 317.41, 86.03, 86.24]
-  V_MAX = 0.8
-  AX_MAX = 0.80
-  LIMIT_M = 0.30
-  CAM_INDEX = 0
-  WARP_W = 1280
-  WARP_H = 720
-
-EEG (from dataCollection.py):
-  Unicorn Hybrid Black via UnicornPy
-  FS = 250 Hz
-  N_CHANNELS = 17 during collection, first 8 channels are used downstream
-  GetAvailableDevices(True) → Unicorn(device) → StartAcquisition(False)
-  samples_per_read = 4, buffer_size = samples * channels * 4
+Documentation:
+  EEG_vs_EEG-OpenCV_Issues.md        Hybrid control design notes
+  README_GUI.md                      GUI usage guide
+  SYSTEM_ARCHITECTURE_AND_WORKING.txt  (this file)
 
 ================================================================================
-7. TROUBLESHOOTING
+7. CONFIGURATION PARAMETERS (hardware_config.py)
 ================================================================================
 
-- No model found: Train first; ensure .pth files exist in expected paths
-- Robot connection failed: Check ROBOT_IP, network, Kortex API
-- Unicorn not found: Install UnicornPy, connect device
-- Preprocessing fails: Ensure CSVs in data/N_class/, check notebook paths
-- FBMSNet training: Copy .npy files to FBMSNet/data/ (GUI does this)
+Robot:
+  ROBOT_IP, USERNAME, PASSWORD
+  ANGLES_INIT, LIMIT_M=0.35, V_MAX=0.8, AX_MAX=0.80
+  BOUNDARY_MARGIN_M=0.0
+
+Camera / vision (Option 6):
+  CAM_INDEX=0, WARP_W=1280, WARP_H=720
+  PIXELS_PER_CM_BAR=24.0, M_PER_PX_BAR=0.01/24
+  CALIB_SIGN=+1, HZ=60
+  KP_POS=1.2, KD_ERR=0.20, KV_FF=1.10, SMOOTH=0.25
+  LATENCY_S=0.060, LEAD_CLAMP_S=0.80
+  VY_BOUNCE_MIN=120.0, BOOST_MULT=1.6, BOOST_FRAMES=8
+  HSV: BLUE (90–100 H), RED bar (0–10 and 170–180 H)
+  KF_MEAS_STD_PX=4.0, KF_ACCEL_STD=600.0
+
+EEG:
+  EEG_FS=250, EEG_SAMPLES_PER_READ=4
+  8 channels used in inference (Ch1–Ch8 from Unicorn)
+
+================================================================================
+8. TROUBLESHOOTING
+================================================================================
+
+No model found:
+  Train first. Check results/Subject_XX/2_class/MODEL/run_*/checkpoints/
+  Or pass --model-path explicitly to controllers.
+
+Robot connection failed:
+  Verify ROBOT_IP, network, Kortex API install, arm powered on.
+
+Unicorn not found:
+  Install UnicornPy, connect headset, check GetAvailableDevices().
+
+Preprocessing fails:
+  Ensure CSVs in data/N_class/. GUI copies files before notebook run.
+
+FBMSNet training:
+  Copy .npy files to FBMSNet/data/ (GUI handles this).
+
+Option 6 — arm not moving:
+  EEG must be predicting (check buffer fill). Without EEG, vx_cmd=0 always.
+  Verify camera calibration and HSV thresholds for ball/bar detection.
+
+Option 6 — arm moves wrong direction:
+  Flip CALIB_SIGN in hardware_config.py or check class label mapping.
+
+Option 5 — arm barely moves:
+  Position targets (RIGHT_ANGLES) may produce small Cartesian displacement.
+  Check logs for measured dx after go_to_angles.
+
+Hybrid mismatch always slow:
+  EEG class and OpenCV direction use same convention (0=up/neg, 1=down/pos).
+  If consistently mismatched, verify CALIB_SIGN and trained label order.
 
 ================================================================================
 END OF DOCUMENT

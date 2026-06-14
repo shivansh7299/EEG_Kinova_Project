@@ -1,0 +1,142 @@
+{
+  "01": {
+    "EEGNet": {
+      "accuracy_pct": 91.2,
+      "num_samples": 160,
+      "run_id": "run_20260608_021405",
+      "path": "results\\subject_01\\2_class\\eegnet\\run_20260608_021405\\metrics\\eegnet_new_summary.json"
+    },
+    "CTNet": {
+      "accuracy_pct": 47.5,
+      "num_samples": 80,
+      "run_id": "run_20260608_025342",
+      "path": "results\\subject_01\\2_class\\ctnet\\run_20260608_025342\\metrics\\ctnet_summary.json"
+    },
+    "FBMSNet": {
+      "accuracy_pct": 86.0,
+      "num_samples": 200,
+      "run_id": "run_20260608_023250",
+      "path": "results\\subject_01\\2_class\\fbmsnet\\run_20260608_023250\\metrics\\fbmsnet_summary.json"
+    }
+  },
+  "02": {
+    "EEGNet": {
+      "accuracy_pct": 63.1,
+      "num_samples": 160,
+      "run_id": "run_20260607_143025",
+      "path": "results\\subject_02\\2_class\\eegnet\\run_20260607_143025\\metrics\\eegnet_new_summary.json"
+    },
+    "CTNet": {
+      "accuracy_pct": 53.8,
+      "num_samples": 80,
+      "run_id": "run_20260606_030105",
+      "path": "results\\subject_02\\2_class\\ctnet\\run_20260606_030105\\metrics\\ctnet_summary.json"
+    },
+    "FBMSNet": {
+      "accuracy_pct": 60.0,
+      "num_samples": 80,
+      "run_id": "run_20260606_120629",
+      "path": "results\\subject_02\\2_class\\fbmsnet\\run_20260606_120629\\metrics\\fbmsnet_summary.json"
+    }
+  },
+  "03": {
+    "EEGNet": {
+      "accuracy_pct": 72.8,
+      "num_samples": 224,
+      "run_id": "run_20260607_151951",
+      "path": "results\\subject_03\\2_class\\eegnet\\run_20260607_151951\\metrics\\eegnet_new_summary.json"
+    },
+    "CTNet": {
+      "accuracy_pct": 46.4,
+      "num_samples": 112,
+      "run_id": "run_20260603_195418",
+      "path": "results\\subject_03\\2_class\\ctnet\\run_20260603_195418\\metrics\\ctnet_summary.json"
+    },
+    "FBMSNet": {
+      "accuracy_pct": 54.5,
+      "num_samples": 112,
+      "run_id": "run_20260603_193701",
+      "path": "results\\subject_03\\2_class\\fbmsnet\\run_20260603_193701\\metrics\\fbmsnet_summary.json"
+    }
+  },
+  "04": {
+    "EEGNet": {
+      "accuracy_pct": 52.5,
+      "num_samples": 160,
+      "run_id": "run_20260608_004909",
+      "path": "results\\subject_04\\2_class\\eegnet\\run_20260608_004909\\metrics\\eegnet_new_summary.json"
+    },
+    "CTNet": {
+      "accuracy_pct": 45.0,
+      "num_samples": 80,
+      "run_id": "run_20260608_012942",
+      "path": "results\\subject_04\\2_class\\ctnet\\run_20260608_012942\\metrics\\ctnet_summary.json"
+    },
+    "FBMSNet": {
+      "accuracy_pct": 53.0,
+      "num_samples": 200,
+      "run_id": "run_20260608_010907",
+      "path": "results\\subject_04\\2_class\\fbmsnet\\run_20260608_010907\\metrics\\fbmsnet_summary.json"
+    }
+  },
+  "10": {
+    "EEGNet": {
+      "accuracy_pct": 69.6,
+      "num_samples": 224,
+      "run_id": "run_20260607_234723",
+      "path": "results\\subject_10\\2_class\\eegnet\\run_20260607_234723\\metrics\\eegnet_new_summary.json"
+    },
+    "CTNet": {
+      "accuracy_pct": 51.8,
+      "num_samples": 112,
+      "run_id": "run_20260608_002649",
+      "path": "results\\subject_10\\2_class\\ctnet\\run_20260608_002649\\metrics\\ctnet_summary.json"
+    },
+    "FBMSNet": {
+      "accuracy_pct": 59.3,
+      "num_samples": 280,
+      "run_id": "run_20260608_000752",
+      "path": "results\\subject_10\\2_class\\fbmsnet\\run_20260608_000752\\metrics\\fbmsnet_summary.json"
+    }
+  },
+  "11": {
+    "EEGNet": {
+      "accuracy_pct": 67.0,
+      "num_samples": 224,
+      "run_id": "run_20260608_233152",
+      "path": "results\\subject_11\\2_class\\eegnet\\run_20260608_233152\\metrics\\eegnet_new_summary.json"
+    },
+    "CTNet": {
+      "accuracy_pct": 46.4,
+      "num_samples": 112,
+      "run_id": "run_20260609_002223",
+      "path": "results\\subject_11\\2_class\\ctnet\\run_20260609_002223\\metrics\\ctnet_summary.json"
+    },
+    "FBMSNet": {
+      "accuracy_pct": 61.1,
+      "num_samples": 280,
+      "run_id": "run_20260608_235901",
+      "path": "results\\subject_11\\2_class\\fbmsnet\\run_20260608_235901\\metrics\\fbmsnet_summary.json"
+    }
+  },
+  "12": {
+    "EEGNet": {
+      "accuracy_pct": 76.8,
+      "num_samples": 224,
+      "run_id": "run_20260609_162547",
+      "path": "results\\subject_12\\2_class\\eegnet\\run_20260609_162547\\metrics\\eegnet_new_summary.json"
+    },
+    "CTNet": {
+      "accuracy_pct": 48.2,
+      "num_samples": 112,
+      "run_id": "run_20260609_171152",
+      "path": "results\\subject_12\\2_class\\ctnet\\run_20260609_171152\\metrics\\ctnet_summary.json"
+    },
+    "FBMSNet": {
+      "accuracy_pct": 71.8,
+      "num_samples": 280,
+      "run_id": "run_20260609_164911",
+      "path": "results\\subject_12\\2_class\\fbmsnet\\run_20260609_164911\\metrics\\fbmsnet_summary.json"
+    }
+  }
+}
