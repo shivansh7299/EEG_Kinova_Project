@@ -11,7 +11,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RESULTS_DIR = PROJECT_ROOT / "results"
 
-SUBJECTS = ["01", "02", "03", "04", "10", "11", "12"]
+SUBJECTS = ["01", "02", "03", "04", "10", "11", "12", "13", "14", "15", "16", "17"]
 MODELS = {
     "EEGNet": "eegnet_new_summary.json",
     "CTNet": "ctnet_summary.json",

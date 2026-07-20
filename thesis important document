@@ -1,0 +1,878 @@
+================================================================================
+THESIS IMPORTANT DOCUMENT
+EEG + VISION + KINOVA ROBOTIC ARM EXPERIMENT
+================================================================================
+
+This document summarizes the complete experiment, system architecture, data
+collection protocol, preprocessing pipeline, model training parameters, real-time
+control logic, hardware/software environment, and important implementation notes.
+
+Project root:
+  C:\Users\Shivans1\Desktop\Kinova_arm_project\EEG_Kinova_Project
+
+Main experiment goal:
+  The goal of the experiment is to evaluate EEG-based motor-imagery control of a
+  Kinova Gen3 robotic arm, and to compare EEG-only control against an EEG + vision
+  hybrid mode. In the hybrid mode, EEG determines the intended movement direction,
+  while OpenCV vision tracking modulates the movement speed based on whether the
+  vision-estimated direction matches the EEG-predicted direction.
+
+================================================================================
+1. EXPERIMENT SUMMARY
+================================================================================
+
+Number of subjects:
+  10 subjects
+
+Task:
+  Two-class motor imagery task.
+
+Classes:
+  CSV class label 1 -> Up / Right Arm imagery
+  CSV class label 2 -> Down / Left Arm imagery
+
+After label encoding:
+  Model class 0 -> Up / Right
+  Model class 1 -> Down / Left
+
+Robot/OpenCV sign convention:
+  Class 0 -> negative Cartesian X velocity -> up direction on screen
+  Class 1 -> positive Cartesian X velocity -> down direction on screen
+
+Experimental modes:
+  1. EEG-only mode
+     - Uses kinova_eeg_controller.py
+     - EEG prediction controls arm movement without camera input.
+     - Current controller uses position-based target switching with go_to_angles().
+
+  2. EEG + Vision mode
+     - Uses kinova_eeg_opencv_controller.py
+     - EEG controls movement direction.
+     - Vision/OpenCV controls movement speed magnitude and match/mismatch scaling.
+     - If EEG and OpenCV direction match: robot moves at full speed.
+     - If EEG and OpenCV direction mismatch: robot moves at half speed.
+
+  3. OpenCV standalone mode
+     - Uses OpenCV/track_ball_kinova_test_fixed.py
+     - Vision-only ball/bar tracking reference implementation.
+
+================================================================================
+2. DATA COLLECTION PROTOCOL
+================================================================================
+
+Data collection script:
+  dataCollection.py
+
+GUI launcher:
+  eeg_kinova_control_gui.py
+
+Number of subjects:
+  10
+
+Number of classes:
+  2
+
+Number of trials per class:
+  20 trials per class
+
+Total trials per subject:
+  140 trials per subject per class
+  Calculation: 2 classes x 140 trials/class = 280 trials
+
+Sampling rate:
+  250 Hz
+
+EEG channels acquired:
+  17 channels from Unicorn acquisition stream are written to CSV.
+
+EEG channels used downstream:
+  8 EEG channels are used for preprocessing, training, and real-time inference.
+  These correspond to Ch1-Ch8 from the recorded CSV stream.
+
+Output CSV columns:
+  trial_index
+  class_label
+  phase
+  timestamp
+  Ch1 ... Ch17
+
+Saved data location:
+  data/Subject <N>/<num_classes>_class/
+
+Example folder:
+  data/Subject 1/2_class/
+
+Data file naming:
+  EEG_<display_mode>_trials_<trials_per_class>_classes_<num_classes>_<timestamp>.csv
+
+Example:
+  EEG_bar_trials_20_classes_2_YYYYMMDD_HHMMSS.csv
+
+Display mode:
+  bar
+
+Initial stabilization duration:
+  20 seconds
+
+Important note:
+  Stabilization is used before trial recording begins. In the current
+  dataCollection.py flow, EEG acquisition starts first, but CSV recording is
+  enabled after stabilization completes.
+
+Trial phase durations:
+  Rest / baseline duration: 1 second
+  Cue / instruction duration: 2 seconds
+  Imagery / stimulus duration: 5 seconds
+
+Total trial duration:
+  8 seconds per trial
+
+Calculation:
+  1 s baseline + 2 s cue + 5 s imagery = 8 s per trial
+
+Samples per phase at 250 Hz:
+  Baseline/rest: 1 s x 250 Hz = 250 samples
+  Cue/instruction: 2 s x 250 Hz = 500 samples
+  Imagery/stimulus: 5 s x 250 Hz = 1250 samples
+
+Samples per full trial:
+  8 s x 250 Hz = 2000 samples
+
+Class labels shown to participant:
+  Class 1: Up (Right Arm)
+  Class 2: Down (Left Arm)
+
+================================================================================
+3. PREPROCESSING PIPELINE
+================================================================================
+
+Preprocessing notebooks:
+  preprocessing_3_class_EEGNet.ipynb
+  preprocessing_3_class_CTNet.ipynb
+  preprocessing_3_class_FBMSNet.ipynb
+
+Filtering range:
+  4-40 Hz
+
+Filter type:
+  Butterworth bandpass filter with zero-phase filtering using filtfilt.
+
+Sampling rate used in preprocessing:
+  250 Hz
+
+Channels used:
+  8 EEG channels
+
+Label encoding:
+  Original CSV labels: 1 and 2
+  Encoded model labels: 0 and 1
+  CSV label 1 -> model class 0
+  CSV label 2 -> model class 1
+
+Train/test split:
+  80/20 trial-level split
+
+Split type:
+  Stratified train/test split where possible.
+
+Typical split for 20 trials/class:
+  Training set:
+    16 trials/class
+    32 total trials/subject
+
+  Test set:
+    4 trials/class
+    8 total trials/subject
+
+Important split rule:
+  The split is performed at the trial level to avoid mixing windows from the
+  same trial into both train and test sets.
+
+Window length:
+  1 second
+
+Window length in samples:
+  250 samples
+
+Requested thesis overlap:
+  50%
+
+50% overlap stride:
+  125 samples
+
+Important implementation note about overlap:
+  EEGNet_new_training.py default uses:
+    window_size = 250 samples
+    step_size   = 75 samples
+  This corresponds to 70% overlap for EEGNet training augmentation.
+
+  Calculation:
+    overlap = (250 - 75) / 250 = 0.70 = 70%
+
+  Some preprocessing/reference code also documents 50% overlap using:
+    train_stride = window_size // 2 = 125 samples
+
+
+Model-specific preprocessed input shapes:
+  EEGNet:
+    Input shape: (N, 1, 8, T) or reshaped internally to (N, 8, T)
+    Windowed training input: 8 channels x 250 samples
+
+  CTNet:
+    Input shape: (N, 8, 250)
+
+  FBMSNet:
+    Input shape: (N, 9, 8, 248)
+    Meaning: 9 frequency bands x 8 channels x 248 time samples
+
+================================================================================
+4. MODEL 1: EEGNET TRAINING PARAMETERS
+================================================================================
+
+Training script:
+  EEGNet_new_training.py
+
+Model definition:
+  EEGNet_new_model.py
+
+Model:
+  Improved EEGNet
+
+Input:
+  8 EEG channels
+  1-second windows
+  250 samples/window
+
+Default training function:
+  train_eegnet()
+
+Use windowing:
+  True
+
+Window size:
+  250 samples
+  1 second at 250 Hz
+
+Step size in current script:
+  75 samples
+
+Overlap in current script:
+  70%
+
+Batch size:
+  16
+
+Epochs:
+  1500 maximum epochs
+
+Optimizer:
+  Adam
+
+Learning rate:
+  1e-4
+
+Weight decay:
+  1e-4
+
+Loss function:
+  CrossEntropyLoss with class weights
+
+Scheduler:
+  ReduceLROnPlateau
+
+Scheduler settings:
+  mode: min
+  factor: 0.1
+  patience: 10
+  min_lr: 1e-6
+
+Early stopping:
+  patience = 300
+  monitor = validation loss
+  mode = min
+  min_delta = 0.0001
+
+Train/validation split:
+  90/10 split from the training set
+
+Test set:
+  Held-out 20% trial-level test split from preprocessing
+
+Random seed:
+  42
+
+Dropout:
+  0.5
+
+Core EEGNet parameters:
+  F1 = 16
+  D = 2
+  F2 = None in call, auto-handled by model
+  Temporal kernel = auto, approximately 0.5 seconds = 125 samples at 250 Hz
+  Spatial dropout = enabled
+
+DataLoader:
+  train_loader:
+    batch_size = 16
+    shuffle = True
+    num_workers = 0
+    drop_last = True
+
+  val_loader:
+    batch_size = 16
+    shuffle = False
+    num_workers = 0
+
+  test_loader:
+    batch_size = 16
+    shuffle = False
+    num_workers = 0
+
+Outputs:
+  results/Subject_##/2_class/EEGNet/run_*/checkpoints/
+    eegnet_new_best.pth
+    eegnet_new_last.pth
+    eegnet_new_label_map.json
+
+  results/Subject_##/2_class/EEGNet/run_*/metrics/
+    eegnet_new_summary.json
+    eegnet_new_classification_report.json
+    eegnet_new_classification_report.txt
+
+  results/Subject_##/2_class/EEGNet/run_*/figures/
+    confusion matrices
+    training curves
+
+================================================================================
+5. MODEL 2: CTNET TRAINING PARAMETERS
+================================================================================
+
+Training script:
+  ctnet_training.py
+
+Model definition:
+  ctnet_model.py
+
+Input:
+  Shape: (N, 8, 250)
+  8 EEG channels
+  1-second windows
+  250 samples/window
+
+Preprocessed files:
+  X_train_ctnet.npy
+  y_train_ctnet.npy
+  X_test_ctnet.npy
+  y_test_ctnet.npy
+
+Train/test split:
+  80/20 trial-level split from preprocessing
+
+Train/validation split:
+  90/10 split from the training set
+
+Batch size:
+  16
+
+Learning rate search:
+  Current active learning rate list: [1e-3]
+
+Learning rate:
+  1e-3
+
+Epochs:
+  300 epochs per learning rate
+
+Optimizer:
+  AdamW
+
+Weight decay:
+  3e-4
+
+Loss function:
+  CrossEntropyLoss with class weights
+
+Scheduler:
+  ReduceLROnPlateau
+
+Scheduler settings:
+  mode: max
+  factor: 0.5
+  patience: 30
+  min_lr: 1e-6
+
+Early stopping:
+  patience = 100
+  monitor = validation accuracy
+
+Gradient clipping:
+  max_norm = 1.0
+
+Model used in final learning-rate loop:
+  CTNetLite
+
+CTNetLite call:
+  CTNetLite(
+      n_channels=n_channels,
+      n_timepoints=n_timepoints,
+      n_classes=num_classes,
+      dropout_conv=0.5
+  )
+
+Important implementation note:
+  ctnet_training.py first creates a CTNet model for architecture inspection, but
+  inside the active learning-rate loop it reinitializes and trains CTNetLite.
+  Therefore, CTNetLite is the model actually trained in the active loop.
+
+DataLoader:
+  train_loader:
+    batch_size = 16
+    shuffle = True
+    num_workers = 0
+    drop_last = True
+
+  val_loader:
+    batch_size = 16
+    shuffle = False
+    num_workers = 0
+
+  test_loader:
+    batch_size = 16
+    shuffle = False
+    num_workers = 0
+
+Outputs:
+  results/Subject_##/2_class/CTNet/run_*/checkpoints/
+    ctnet_best_model_lr_0.001000.pth
+
+  results/Subject_##/2_class/CTNet/run_*/metrics/
+    ctnet_summary.json
+    ctnet_lr_search_results.json
+    ctnet_classification_report.json
+    ctnet_classification_report.txt
+
+  results/Subject_##/2_class/CTNet/run_*/figures/
+    CTNet confusion matrices
+    LR search plots
+
+================================================================================
+6. MODEL 3: FBMSNET TRAINING PARAMETERS
+================================================================================
+
+Training script:
+  FBMSNet/train_custom_fbmsnet_updated.py
+
+Model definition:
+  FBMSNet/codes/centralRepo/networks.py
+
+Input:
+  Shape: (N, 9, 8, 248)
+  9 filterbank frequency bands
+  8 EEG channels
+  248 time samples
+
+Preprocessed files:
+  X_train_fbmsnet.npy
+  y_train_fbmsnet.npy
+  X_test_fbmsnet.npy
+  y_test_fbmsnet.npy
+
+Dataset:
+  EEGMultiBandDataset
+
+Train/test split:
+  80/20 trial-level split from preprocessing
+
+Train/validation split:
+  90/10 random split from full training set
+
+Batch size:
+  16
+
+Epochs:
+  300
+
+Optimizer:
+  Adam
+
+Learning rate:
+  1e-3
+
+Loss function:
+  NLLLoss
+
+Reason for NLLLoss:
+  FBMSNet classifier head ends with LogSoftmax, so NLLLoss is used.
+
+Scheduler:
+  No scheduler in current script.
+
+Early stopping:
+  No explicit early stopping in current script.
+  The script saves the best model state based on validation accuracy.
+
+Model parameters:
+  nChan = 8
+  nTime = 248
+  nClass = detected from y_train_fbmsnet.npy
+  temporalLayer = LogVarLayer
+  num_Feat = 36
+  dilatability = 8
+  dropoutP = 0.6
+
+DataLoader:
+  train_loader:
+    batch_size = 16
+    shuffle = True
+
+  val_loader:
+    batch_size = 16
+    shuffle = False
+
+  test_loader:
+    batch_size = 16
+    shuffle = False
+
+Outputs:
+  results/Subject_##/2_class/FBMSNet/run_*/checkpoints/
+    fbmsnet_best_model.pth
+
+  results/Subject_##/2_class/FBMSNet/run_*/metrics/
+    fbmsnet_summary.json
+    fbmsnet_training_summary.json
+    fbmsnet_epoch_history.json
+    fbmsnet_classification_report.json
+    fbmsnet_classification_report.txt
+
+  results/Subject_##/2_class/FBMSNet/run_*/figures/
+    FBMSNet confusion matrices
+    training curves
+
+================================================================================
+7. REAL-TIME EEG INFERENCE
+================================================================================
+
+Real-time predictor:
+  real_time_eeg_predictor.py
+
+Sampling rate:
+  250 Hz
+
+Channels used:
+  8 EEG channels
+
+Window length:
+  250 samples
+  1 second
+
+Filtering:
+  4-40 Hz Butterworth bandpass filter
+
+Normalization:
+  Z-score normalization
+
+Prediction output:
+  predicted class index
+  softmax probability array
+
+Controller prediction interval:
+  0.5 seconds
+
+Prediction frequency:
+  2 Hz
+
+Model support:
+  EEGNet
+  CTNet
+  FBMSNet
+
+Default model checkpoint lookup:
+  EEGNet:
+    outputs/eegnet_new_best.pth
+    eegnet_best_model.pth
+
+  CTNet:
+    ctnet_best_model.pth
+
+  FBMSNet:
+    FBMSNet/fbmsnet_best_model.pth
+
+Explicit checkpoint override:
+  --model-path path/to/checkpoint.pth
+
+================================================================================
+8. REAL-TIME ROBOT CONTROL
+================================================================================
+
+Robot:
+  Kinova Gen3 robotic arm
+
+Robot API:
+  Kortex API
+
+Robot IP:
+  192.168.1.10
+
+Username/password:
+  admin / admin
+
+Initial joint pose:
+  [97.39, 41.8, 194.35, 232.9, 317.41, 86.03, 86.24]
+
+Movement axis:
+  Cartesian linear_x only
+
+Workspace corridor:
+  LIMIT_M = 0.35 m
+
+Maximum velocity:
+  V_MAX = 0.8 m/s
+
+Maximum acceleration/slew:
+  AX_MAX = 0.80 m/s^2
+
+--------------------------------------------------------------------------------
+8.1 EEG-ONLY CONTROL
+--------------------------------------------------------------------------------
+
+Controller:
+  kinova_eeg_controller.py
+
+Control type:
+  Position-based target switching
+
+Class-to-target mapping:
+  Class 0 -> RIGHT_ANGLES
+  Class 1 -> LEFT_ANGLES = ANGLES_INIT
+
+Prediction interval:
+  0.5 seconds
+
+Movement command:
+  go_to_angles()
+
+Duplicate move protection:
+  The controller avoids launching a new move if the same target was already sent
+  or if a previous movement thread is still active.
+
+--------------------------------------------------------------------------------
+8.2 EEG + VISION HYBRID CONTROL
+--------------------------------------------------------------------------------
+
+Controller:
+  kinova_eeg_opencv_controller.py
+
+Control type:
+  Velocity-based hybrid control
+
+Main loop rate:
+  60 Hz
+
+Camera:
+  CAM_INDEX = 0
+  CAM_URL = None
+  WARP_W x WARP_H = 1280 x 720
+
+Vision processing:
+  HSV detection for blue ball
+  HSV detection for red bar
+  Kalman filter for ball position and velocity
+  Predictive intercept control for bar motion
+
+HSV thresholds:
+  BLUE_LO = (90, 100, 100)
+  BLUE_HI = (100, 255, 255)
+  RED1_LO = (0, 120, 70)
+  RED1_HI = (10, 255, 255)
+  RED2_LO = (170, 120, 70)
+  RED2_HI = (180, 255, 255)
+
+Vision-to-robot scaling:
+  PIXELS_PER_CM_BAR = 24.0
+  M_PER_PX_BAR = 0.01 / 24.0
+  CALIB_SIGN = 1
+
+OpenCV direction threshold:
+  DIR_THRESHOLD = 0.02 m/s
+
+OpenCV direction mapping:
+  vx < -0.02 -> OpenCV direction class 0
+  vx > +0.02 -> OpenCV direction class 1
+  otherwise  -> None / ambiguous
+
+EEG + Vision fusion:
+  EEG always controls direction.
+  Vision controls speed magnitude.
+
+EEG direction:
+  EEG class 0 -> sign = -1.0
+  EEG class 1 -> sign = +1.0
+
+Speed logic:
+  If OpenCV direction is available:
+    measured speed = abs(opencv_vx)
+    speed is clamped to [0.01, V_MAX]
+
+    If EEG class == OpenCV direction:
+      speed multiplier = V_FAST_MULT = 1.0
+      robot moves fast / full speed
+
+    If EEG class != OpenCV direction:
+      speed multiplier = V_SLOW_MULT = 0.5
+      robot moves slow / half speed
+
+  If OpenCV direction is not available:
+    speed = BASE_VX = 0.177 m/s
+
+Final command:
+  vx_cmd = CALIB_SIGN x EEG_direction_sign x speed
+
+No EEG prediction:
+  Robot stops.
+
+Held prediction duration:
+  VELOCITY_HOLD_S = 0.8 seconds
+
+================================================================================
+9. HARDWARE AND SOFTWARE VERSIONS
+================================================================================
+
+Hardware:
+  EEG device:
+    Unicorn Hybrid Black EEG headset
+
+  Robotic arm:
+    Kinova Gen3 robotic arm
+
+  Camera:
+    USB camera through OpenCV VideoCapture
+    Resolution after warp: 1280 x 720
+
+  Computer OS:
+    Windows 11 / Windows 10.0.26200 platform
+
+Software detected in current Python environment:
+  Python:
+    3.13.9, Anaconda packaged
+
+  Platform:
+    Windows-11-10.0.26200-SP0
+
+  NumPy:
+    2.3.5
+
+  Pandas:
+    2.3.3
+
+  Matplotlib:
+    3.10.6
+
+  scikit-learn:
+    1.7.2
+
+  SciPy:
+    1.16.3
+
+  PyQt5:
+    5.15.11
+
+  Qt:
+    5.15.2
+
+  UnicornPy:
+    Available
+
+  Kortex API:
+    Available
+
+Important environment note:
+  The currently checked Python environment did not expose torch, cv2, or filterpy.
+  The GUI is configured to launch heavy training/inference scripts through a
+  separate conda environment named:
+    torch37
+  or through a local .conda/python.exe if present.
+
+  Therefore, for thesis reporting, list the exact PyTorch/OpenCV/filterpy
+  versions from the training/runtime conda environment if required by the final
+  submission.
+
+
+
+================================================================================
+11. IMPORTANT THESIS VALUES AT A GLANCE
+================================================================================
+
+Number of subjects:
+  10
+
+Sampling rate:
+  250 Hz
+
+EEG channels used:
+  8 channels
+
+Number of classes:
+  2
+
+Trials per class:
+  20
+
+Total trials per subject:
+  280, 140 per class per subject
+
+Rest/baseline duration:
+  1 second
+
+Cue/instruction duration:
+  2 seconds
+
+Imagery/stimulus duration:
+  5 seconds
+
+Total trial duration:
+  8 seconds
+
+Filtering range:
+  4-40 Hz
+
+Window length:
+  1 second = 250 samples
+
+Overlap:
+  Current EEGNet training implementation: 70% overlap (step_size=75)
+
+Train/test split:
+  80/20 trial-level split
+
+Train/validation split:
+  90/10 from training set for EEGNet and CTNet
+  90/10 random split from training set for FBMSNet
+
+Batch size:
+  EEGNet: 16
+  CTNet: 16
+  FBMSNet: 16
+
+Optimizer:
+  EEGNet: Adam
+  CTNet: AdamW
+  FBMSNet: Adam
+
+Learning rate:
+  EEGNet: 1e-4
+  CTNet: 1e-3
+  FBMSNet: 1e-3
+
+Epochs:
+  EEGNet: 300
+  CTNet: 300 per learning rate
+  FBMSNet: 300
+
+Loss function:
+  EEGNet: CrossEntropyLoss with class weights
+  CTNet: CrossEntropyLoss with class weights
+  FBMSNet: NLLLoss
+
+================================================================================
+END OF DOCUMENT
+================================================================================

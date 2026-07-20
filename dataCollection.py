@@ -548,7 +548,7 @@ class EEGTrialGUI(QWidget):
         self.color_display.hide()
         self.phase_duration = self.instruction_display_ms
         color_name = self.color_names[self.current_class]
-        self.info_label.setText(f"Think about color:\n\n{color_name}")
+        self.info_label.setText(f"Think about Arm:\n\n{color_name}")
         self.phase_elapsed = 0
         self.progress.setValue(0)
         self.set_background_color(QColor(0, 0, 0))

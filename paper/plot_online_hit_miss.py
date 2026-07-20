@@ -40,7 +40,7 @@ OFFLINE_MODEL_COLORS = {
     "FBMSNet": "#55A868",
 }
 
-SUBJECTS = ["S1", "S2", "S3", "S4", "S5"]  # Update with your subject IDs
+SUBJECTS = ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10"]  # Update with your subject IDs
 
 # =============================================================================
 # OPTION A — Paste totals from your paper forms here (per subject)
@@ -69,6 +69,26 @@ SUBJECT_DATA = {
     "S5": {
         "EEG_only":   {"hit": 13, "miss": 4, "gain": 4, "loss": 4},
         "EEG_Vision": {"hit": 10, "miss": 3, "gain": 4, "loss": 3},
+    },
+    "S6": {
+        "EEG_only":   {"hit": 9, "miss": 5, "gain": 6, "loss": 5},
+        "EEG_Vision": {"hit": 10, "miss": 3, "gain": 4, "loss": 3},
+    },
+    "S7": {
+        "EEG_only":   {"hit": 9, "miss": 5, "gain": 5, "loss": 5},
+        "EEG_Vision": {"hit": 9, "miss": 3, "gain": 4, "loss": 3},
+    },
+    "S8": {
+        "EEG_only":   {"hit": 12, "miss": 3, "gain": 3, "loss": 3},
+        "EEG_Vision": {"hit": 11, "miss": 2, "gain": 3, "loss": 2},
+    },
+    "S9": {
+        "EEG_only":   {"hit": 12, "miss": 4, "gain": 5, "loss": 4},
+        "EEG_Vision": {"hit": 11, "miss": 2, "gain": 4, "loss": 2},
+    },
+    "S10": {
+        "EEG_only":   {"hit": 9, "miss": 4, "gain": 4, "loss": 4},
+        "EEG_Vision": {"hit": 9, "miss": 2, "gain": 3, "loss": 2},
     },
 }
 
@@ -246,7 +266,9 @@ def plot_all_metrics_grouped(data: dict) -> None:
     """Fig 3 — Hit, Miss, Gain, Loss grouped bars: EEG vs EEG+Vision per subject."""
     metrics = ["hit", "miss", "gain", "loss"]
     n_subj = len(SUBJECTS)
-    fig, axes = plt.subplots(2, 3, figsize=(10, 6))
+    ncols = 3
+    nrows = int(np.ceil(n_subj / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(10, 3.0 * nrows), squeeze=False)
     axes = axes.flatten()
 
     for i, subj in enumerate(SUBJECTS):
@@ -273,6 +295,27 @@ def plot_all_metrics_grouped(data: dict) -> None:
     _save(fig, "online_fig3_all_metrics_by_subject.png")
 
 
+# def plot_hybrid_improvement(data: dict) -> None:
+#     """Fig 4 — Change in success rate: EEG+Vision minus EEG-only."""
+#     deltas = [
+#         success_rate(data[s]["EEG_Vision"]) - success_rate(data[s]["EEG_only"])
+#         for s in SUBJECTS
+#     ]
+#     colors = ["#55A868" if d >= 0 else "#C44E52" for d in deltas]
+
+#     fig, ax = plt.subplots(figsize=(6.5, 4))
+#     bars = ax.bar(SUBJECTS, deltas, color=colors, edgecolor="white")
+#     ax.axhline(0, color="black", linewidth=0.8)
+#     ax.set_ylabel("Δ Success Rate (pp)\n(EEG+Vision − EEG only)")
+#     ax.set_title("Hybrid Mode Improvement per Subject")
+#     ax.grid(axis="y", alpha=0.25)
+#     for bar, d in zip(bars, deltas):
+#         if d != 0:
+#             ax.text(bar.get_x() + bar.get_width() / 2, d + (0.8 if d >= 0 else -1.2),
+#                     f"{d:+.1f}", ha="center", va="bottom" if d >= 0 else "top", fontsize=9)
+#     _save(fig, "online_fig4_improvement_delta.png")
+
+
 def plot_hybrid_improvement(data: dict) -> None:
     """Fig 4 — Change in success rate: EEG+Vision minus EEG-only."""
     deltas = [
@@ -283,14 +326,29 @@ def plot_hybrid_improvement(data: dict) -> None:
 
     fig, ax = plt.subplots(figsize=(6.5, 4))
     bars = ax.bar(SUBJECTS, deltas, color=colors, edgecolor="white")
+
     ax.axhline(0, color="black", linewidth=0.8)
     ax.set_ylabel("Δ Success Rate (pp)\n(EEG+Vision − EEG only)")
-    ax.set_title("Hybrid Mode Improvement per Subject")
+    ax.set_title("Hybrid Mode Improvement per Subject", pad=12)
     ax.grid(axis="y", alpha=0.25)
+
+    # Add extra space above tallest bar so labels do not go outside
+    ymax = max(deltas)
+    ymin = min(0, min(deltas))
+    ax.set_ylim(ymin, ymax + 4)
+
     for bar, d in zip(bars, deltas):
         if d != 0:
-            ax.text(bar.get_x() + bar.get_width() / 2, d + (0.8 if d >= 0 else -1.2),
-                    f"{d:+.1f}", ha="center", va="bottom" if d >= 0 else "top", fontsize=9)
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                d + 0.6 if d >= 0 else d - 0.6,
+                f"{d:+.1f}",
+                ha="center",
+                va="bottom" if d >= 0 else "top",
+                fontsize=9
+            )
+
+    fig.tight_layout()
     _save(fig, "online_fig4_improvement_delta.png")
 
 

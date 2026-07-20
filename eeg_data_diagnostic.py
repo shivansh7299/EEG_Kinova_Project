@@ -50,7 +50,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 EXPECTED_EEG_NAMES = ["Fz", "C3", "Cz", "C4", "P3", "Pz", "P4", "Oz"]
 
 # What the preprocessing notebooks actually use:
-NOTEBOOK_SLICE = slice(5, 13)   # data.columns[5:13]
+NOTEBOOK_SLICE = slice(4, 12)   # data.columns[5:13]
 # What real_time_eeg_predictor.py uses at inference (first 8 channels):
 INFERENCE_SLICE_AFTER_META = slice(4, 12)  # 4 metadata cols then Ch1..Ch8
 
@@ -221,7 +221,7 @@ def separability_index(powers):
 # --------------------------------------------------------------------------- #
 def main():
     ap = argparse.ArgumentParser(description="Read-only EEG data diagnostic.")
-    ap.add_argument("--subjects", type=int, nargs="+", default=[1, 2, 3, 4])
+    ap.add_argument("--subjects", type=int, nargs="+", default=[1, 2, 3, 4,10,11,12,13,14,15,16])
     ap.add_argument("--classes", type=int, default=2)
     args = ap.parse_args()
 
